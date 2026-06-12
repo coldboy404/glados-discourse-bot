@@ -9,7 +9,3 @@ ENV_BOT_TOKEN = "Telegram Bot Token"
 
 [[kv_namespaces]]
 binding = "GLADOS_DB"
-id = ""
-
-[triggers]
-crons = ["0 * * * *"]
