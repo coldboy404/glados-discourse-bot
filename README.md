@@ -27,19 +27,15 @@ GLaDOS 自动签到 + NodeLoc 自动阅读 合体 Telegram Bot，运行在 Cloud
 
 1. **点击上方屎黄色按钮**
 2. **登录 GitHub 授权**（Fork 仓库）
-3. **创建 KV Namespace**
-   - Cloudflare Dashboard → Workers & Pages → KV
-   - 创建命名空间（名称随意，如 `GLADOS_DB`）
-   - 复制 Namespace ID
-4. **设置 wrangler.toml**
-   - 将 KV ID 填入 `wrangler.toml` 的 `[[kv_namespaces]]` 中
-5. **设置环境变量**
+3. **选择 KV Namespace**（或创建新的）
+   - 部署界面会让你绑定 `GLADOS_DB` KV 命名空间
+   - 直接选「创建新 Namespace」或选已有的即可
+4. **设置环境变量**
    - `ENV_BOT_TOKEN`：Telegram Bot Token（[BotFather](https://t.me/BotFather) 创建）
    - `ENV_ADMIN_ID`：你的 Telegram 用户 ID（[获取](https://t.me/userinfobot)）
-6. **部署完成后，手动设置 Cron 触发器**
-   - Cloudflare Dashboard → Workers & Pages → 你的 Worker → Triggers
-   - 添加 Cron：`0 * * * *`（每小时触发一次）
-   - ⚠️ 部署界面上没有 Cron 选项，必须在 Dashboard 里设置
+5. **部署**
+   - Cron 触发器已默认配置 `0 * * * *`，无需手动设置
+   - ⚠️ `wrangler.toml` 中不要写 `id` 字段，否则部署会失败
 
 ## 使用
 
@@ -71,18 +67,20 @@ Cookie 获取：
 
 ```bash
 git clone https://github.com/Linsars/glados-nodeloc-bot
-cd YOUR_REPO_NAME
+cd glados-nodeloc-bot
 
 # 安装 wrangler
 npm install -g wrangler
 
-# 配置 KV
-wrangler kv:namespace create GLADOS_DB
+# 配置 KV（创建后把 id 填回 wrangler.toml）
+npx wrangler kv namespace create GLADOS_DB
+
+# 设置秘密变量
+npx wrangler secret put ENV_ADMIN_ID
+npx wrangler secret put ENV_BOT_TOKEN
 
 # 部署
-wrangler secret put ENV_ADMIN_ID
-wrangler secret put ENV_BOT_TOKEN
-wrangler deploy
+npx wrangler deploy
 ```
 
 ## 技术栈
