@@ -42,18 +42,34 @@ GLaDOS 自动签到 + NodeLoc 自动阅读 合体 Telegram Bot，运行在 Cloud
 ### 添加 GLaDOS 账号
 > 账户管理 → 添加账户 → 选择站点 → 输入 `邮箱:Cookie`
 
-Cookie 获取：
+#### 获取 Cookie
+
+**电脑（F12）：**
 1. 浏览器登录 [GLaDOS](https://glados.space)
-2. F12 → Application → Cookies → 复制 `koa:sess` 和 `koa:sess.sig` 值
+2. F12 → Application → Cookies → 复制 `koa:sess` 和 `koa:sess.sig`
 3. 格式：`你的邮箱:koa:sess=xxx; koa:sess.sig=yyy`
 
-### 添加 NodeLoc 账号  
+**iPhone（Surge 模块）：**
+1. 安装 [Surge 模块](https://raw.githubusercontent.com/Linsars/Surge/main/sg/glados.yaml)
+2. Safari 打开 `https://glados.network/console/account` 并登录
+3. 模块自动抓取 Cookie，弹出通知
+4. 从通知中复制 Cookie，按 `邮箱:Cookie` 格式发送给 Bot
+
+### 添加 NodeLoc 账号
 > 账户管理 → 添加账户 → 🌐 NodeLoc 自动阅读 → 粘贴 Cookie
 
-Cookie 获取：
+#### 获取 Cookie
+
+**电脑（F12）：**
 1. 浏览器登录 [NodeLoc](https://www.nodeloc.com)
 2. F12 → Application → Cookies → 复制全部 Cookie 字符串
-3. 格式：`你的名称:_forum_session=xxx; _t=yyy; ...`
+3. 直接发送给 Bot，无需加任何前缀
+
+**iPhone（Surge 模块）：**
+1. 安装 [Surge 模块](https://raw.githubusercontent.com/Linsars/Surge/main/sg/glados.yaml)
+2. Safari 打开 `https://www.nodeloc.com/my/preferences` 并登录
+3. 模块自动抓取 Cookie，弹出通知
+4. 复制整段 Cookie 发送给 Bot
 
 ### 定时任务说明
 - Cron 每小时触发一次
