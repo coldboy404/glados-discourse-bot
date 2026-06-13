@@ -1,117 +1,154 @@
-# GLaDOS + NodeLoc Telegram Bot
+# GLaDOS 签到 & NL/NS 自动阅读 Bot ☁️
 
-[![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/Linsars/glados-nodeloc-bot)
-
-GLaDOS 自动签到 + NodeLoc 自动阅读 合体 Telegram Bot，运行在 Cloudflare Workers 上。
-
----
+Telegram Bot，自动签到 GLaDOS，静默阅读 NodeLoc / NodeSeek 攒升级经验。
 
 ## 功能
 
-### 🤖 GLaDOS 签到
-- 每天定时自动签到
-- 支持多个 GLaDOS 账号
-- 账号状态查看（剩余天数、积分、流量）
-- 积分兑换天数（手动操作）
-- 获取订阅配置
+- ✅ **GLaDOS 多账号签到** — 支持任意数量的 GLaDOS 类账号
+- ✅ **NodeLoc 自动阅读** — 随机读话题，模拟真人阅读行为
+- ✅ **NodeSeek 自动阅读** — 同 NodeLoc，复用同一套 Discourse 引擎
+- ✅ **扩展架构** — 任何 Discourse 论坛只需加一个 `baseUrl` 即可接入
+- ✅ **Telegram 管理** — 绑定/解绑账号，查看统计，实时通知
+- ✅ **定时执行** — Cloudflare Workers Cron 每小时触发一次
+- ✅ **行为仿真** — 随机阅读时长 + 随机休息，避免风控
 
-### 🌐 NodeLoc 自动阅读
-- 每次定时触发静默阅读 5 帖
-- 顺序消费话题，不重复
-- 自动休息机制（12% 概率休息 2-6 小时）
-- 签到通知汇总当日阅读数
+## 部署
 
----
+### 1. 用 Deploy with Workers 按钮（推荐）
 
-## 一键部署
+[![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/Linsars/glados-nodeloc-bot)
 
-1. **点击上方屎黄色按钮**
-2. **登录 GitHub 授权**（Fork 仓库）
-3. **选择 KV Namespace**（或创建新的）
-   - 部署界面会让你绑定 `GLADOS_DB` KV 命名空间
-   - 直接选「创建新 Namespace」或选已有的即可
-4. **设置环境变量**
-   - `BOT_TOKEN`：Telegram Bot Token（[BotFather](https://t.me/BotFather) 创建）
-   - `ADMIN_ID`：你的 Telegram 用户 ID（[获取](https://t.me/userinfobot)）
-5. **部署并激活**
-   - Cron 触发器已默认配置 `0 * * * *`，无需手动设置
-   - 部署完成后**访问 Worker 域名**，自动激活 Webhook + 注册命令
-   - 浏览器显示以下内容表示激活成功：
-     ```json
-     {
-       "status": "running",
-       "webhook": "✅ 已激活",
-       "commands": "✅ 已注册",
-       "note": "发送 /start 开始使用"
-     }
-     ```
-   - 然后给你的 Bot 发 `/start` 即开始使用
+点击后授权 GitHub 和 Cloudflare，填入 `BOT_TOKEN` 和 `ADMIN_ID` 即可。
 
-## 使用
+### 2. 手动部署
 
-### 添加 GLaDOS 账号
-> 账户管理 → 添加账户 → 选择站点 → 输入 `邮箱:Cookie`
+```bash
+# 1. 克隆仓库
+git clone https://github.com/Linsars/glados-nodeloc-bot.git
+cd glados-nodeloc-bot
 
-#### 获取 Cookie
+# 2. 安装 wrangler
+npm install -g wrangler
 
-**电脑（F12）：**
-1. 浏览器登录 [GLaDOS](https://glados.space)
-2. F12 → Application → Cookies → 复制 `koa:sess` 和 `koa:sess.sig`
-3. 格式：`你的邮箱:koa:sess=xxx; koa:sess.sig=yyy`
+# 3. 创建 KV namespace
+wrangler kv:namespace create GLADOS_DB
 
-**iPhone（Surge 模块）：**
-1. 安装 [Surge 模块](https://raw.githubusercontent.com/Linsars/Surge/main/sg/glados.yaml)
-2. Safari 打开 `https://glados.network/console/account` 并登录
-3. 模块自动抓取 Cookie，弹出通知
-4. 从通知中复制 Cookie，按 `邮箱:Cookie` 格式发送给 Bot
+# 4. 配置 wrangler.toml
+#    将 kv_namespaces.id 改成上一步创建的 ID
+#    在 Cloudflare Dashboard 添加 secret:
+#    - BOT_TOKEN: Telegram Bot Token
+#    - ADMIN_ID: 你的 Telegram User ID
 
-### 添加 NodeLoc 账号
-> 账户管理 → 添加账户 → 🌐 NodeLoc 自动阅读 → 粘贴 Cookie
+# 5. 部署
+wrangler deploy
+```
 
-#### 获取 Cookie
+### 3. 激活 Bot
 
-**电脑（F12）：**
-1. 浏览器登录 [NodeLoc](https://www.nodeloc.com)
-2. F12 → Application → Cookies → 复制全部 Cookie 字符串
-3. 直接发送给 Bot，无需加任何前缀
+部署后访问 Worker 域名（例如 `https://glados-bot.xxx.workers.dev/`），会自动激活 Webhook。
 
-**iPhone（Surge 模块）：**
-1. 安装 [Surge 模块](https://raw.githubusercontent.com/Linsars/Surge/main/sg/glados.yaml)
-2. Safari 登录 NodeLoc → 点头像 → 摘要 → 账户，模块自动抓取 Cookie
-3. 模块自动抓取 Cookie，弹出通知
-4. 复制整段 Cookie 发送给 Bot
+如果显示 `{"webhook":"✅ 已激活","commands":"✅ 已注册"}` 则说明激活成功。
 
-### 定时任务说明
-- Cron 每小时触发一次
-- 到签到时间（默认 9:00）自动签到，通知中附带 NodeLoc 今日阅读汇总
-- 非签到时间仅执行 NodeLoc 静默阅读
-- NodeLoc 状态通过「账户管理 → 查看所有账户信息」查看
+## 绑定账号
 
----
+在 Telegram 中与 Bot 对话，通过菜单操作：
+
+### GLaDOS 账号
+点「绑定账号」→ 输入 GLaDOS Cookie（直接从浏览器复制）
+
+### NodeLoc 账号
+点「添加账号」→「🌐 NodeLoc 自动阅读」→ 发送你的 NodeLoc Cookie
+
+### NodeSeek 账号
+点「添加账号」→「🔹 NodeSeek 自动阅读」→ 发送你的 NodeSeek Cookie
+
+## 获取 Cookie（Surge / Loon / QX 模块）
+
+**安装链接（点击即可添加）：**
+```
+https://raw.githubusercontent.com/Linsars/Surge/main/sg/glados.yaml
+```
+
+**支持的站点：**
+- `glados.network` / `glados.rocks` 等 GLaDOS 变体
+- `www.nodeloc.com`（NodeLoc）
+- `nodeseek.cc`（NodeSeek）
+
+安装后，访问对应站点的"账号设置"页面，模块会自动捕获 Cookie。
+
+### 手动获取 Cookie
+
+在所有支持的 Discourse 站点上，用一样的步骤：
+
+1. 登录网站
+2. 浏览器 F12 → Application → Cookies
+3. 复制 `_forum_session` 和 `_t` 的值
+4. 发送给 Bot
+
+## 升级条件参考
+
+### NodeLoc [会员等级系统](https://www.nodeloc.com/t/topic/47018)
+
+| 等级 | 关键条件 | Bot 能跑的 |
+|------|---------|-----------|
+| 🥉 TL1 白银 | 600 分钟阅读，100 篇帖子 | ✅ 全部 |
+| 🥈 TL2 黄金 | 3000 分钟，30 天，赞/回复 | ✅ 阅读 + 访问 |
+| 🥇 TL3 钻石 | 100 天考察期，赞/回复 | ✅ 阅读 + 访问 |
+| 👑 TL4 王者 | 满足 TL3 + 申请投票 | ❌ 手动 |
+
+### NodeSeek [信任等级说明](https://nodeseek.cc/n/topic/283)
+
+| 等级 | 关键条件 | Bot 能跑的 |
+|------|---------|-----------|
+| 🥉 TL1 基础 | 30 篇帖子，10 分钟 | ✅ 全部 |
+| 🥈 TL2 成员 | 100 篇，60 分钟，15 天 | ✅ 阅读 + 访问 |
+| 🥇 TL3 常规 | 200 话题 + 500 帖累计，100 天考察 | ✅ 阅读 + 访问 |
+| 👑 TL4 领袖 | 手动授予 | ❌ |
+
+## 技术架构
+
+```
+┌─────────────────────────────────────────────────┐
+│               handleScheduled (cron)              │
+│  ┌─────────────┐  ┌──────────┐  ┌──────────┐    │
+│  │ GLaDOS       │  │ Discourse 阅读引擎         │    │
+│  │ 签到引擎     │  │ runDiscourseBatch()        │    │
+│  │              │  │ ├─ NodeLoc (NL_BASE)       │    │
+│  │ getAccount   │  │ └─ NodeSeek (NS_BASE)      │    │
+│  │ DataObj()    │  │   任何 Discourse 站都可用    │    │
+│  └─────────────┘  └──────────┘                    │
+└─────────────────────────────────────────────────┘
+```
+
+### Discourse 阅读引擎
+一次编写，Discourse 论坛通用：
+- `nlRefreshQueue(baseUrl, cookie)` — 拉话题列表
+- `nlReadTopic(baseUrl, cookie, topic)` — 读帖 + 标记已读
+- CSRF 自动检测：先找 HTML `<meta>`，没有则调 API
+- 队列式阅读，每 cron 读 5 帖，12% 概率休息 20-40 分钟
+
+## 环境变量 / Secrets
+
+| 变量 | 说明 | 获取方式 |
+|------|------|---------|
+| `BOT_TOKEN` | Telegram Bot Token | [@BotFather](https://t.me/BotFather) |
+| `ADMIN_ID` | 你的 Telegram User ID | [@userinfobot](https://t.me/userinfobot) |
+| `GLADOS_DB` | KV Namespace ID | `wrangler kv:namespace create` |
 
 ## 本地开发
 
 ```bash
-git clone https://github.com/Linsars/glados-nodeloc-bot
+# 克隆
+git clone https://github.com/Linsars/glados-nodeloc-bot.git
 cd glados-nodeloc-bot
 
-# 安装 wrangler
-npm install -g wrangler
+# 安装依赖
+npm install
 
-# 配置 KV（创建后把 id 填回 wrangler.toml）
-npx wrangler kv namespace create GLADOS_DB
-
-# 设置秘密变量
-npx wrangler secret put ADMIN_ID
-npx wrangler secret put BOT_TOKEN
-
-# 部署
-npx wrangler deploy
+# 本地测试
+wrangler dev --remote
 ```
 
-## 技术栈
-- Cloudflare Workers（Free Plan）
-- Cloudflare Workers KV
-- Telegram Bot API
-- Discourse API（NodeLoc）
-- GLaDOS API
+## License
+
+MIT
