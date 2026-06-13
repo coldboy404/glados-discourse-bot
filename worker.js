@@ -11,6 +11,16 @@ const HEADERS = {
 };
 
 
+// 通用超时 fetch（Promise.race 实现，Workers 环境验证通过）
+async function safeFetchTimeout(url, opts, ms = 12000) {
+    try {
+        return await Promise.race([
+            fetch(url, opts || {}),
+            new Promise((_, rj) => setTimeout(() => rj(new Error('TIMEOUT')), ms))
+        ]);
+    } catch(e) { return null; }
+}
+
 // ================= NodeLoc 自动阅读模块（v3 - 静默版） =================
 const NL_BASE = 'https://www.nodeloc.com';
 const NS_BASE = 'https://nodeseek.cc';
@@ -41,27 +51,18 @@ async function nlSaveState(userId, state, env, prefix = 'NL') {
 
 // 刷新话题队列
 async function nlRefreshQueue(baseUrl, cookie) {
-    const controller = new AbortController();
-    const tid = setTimeout(() => controller.abort(), 15000);
-    try {
-        const r = await fetch(baseUrl + '/latest.json?no_definitions=true', {
-            headers: { 'User-Agent': NL_UAS[nlRand(0,NL_UAS.length-1)], 'Cookie': cookie, 'Accept': 'application/json' },
-            signal: controller.signal
-        });
-        clearTimeout(tid);
-        if (!r.ok) return [];
-        const d = await r.json().catch(() => ({}));
-        const topics = (d.topic_list?.topics || []).filter(t => !t.pinned && t.id);
-        return topics.map(t => ({ id: t.id, title: t.title || '话题#'+t.id }));
-    } catch(e) {
-        clearTimeout(tid);
-        return [];
-    }
+    const r = await safeFetchTimeout(baseUrl + '/latest.json?no_definitions=true', {
+        headers: { 'User-Agent': NL_UAS[nlRand(0,NL_UAS.length-1)], 'Cookie': cookie, 'Accept': 'application/json' }
+    }, 15000);
+    if (!r || !r.ok) return [];
+    const d = await r.json().catch(() => ({}));
+    const topics = (d.topic_list?.topics || []).filter(t => !t.pinned && t.id);
+    return topics.map(t => ({ id: t.id, title: t.title || '话题#'+t.id }));
 }
 
 // 模拟阅读一帖（静默，不抛消息）
 async function nlReadTopic(baseUrl, cookie, topic, fast = false) {
-    await nlSleep(nlRand(5000, 15000));
+    await nlSleep(fast ? nlRand(500, 1500) : nlRand(5000, 15000));
     const ua = NL_UAS[nlRand(0, NL_UAS.length-1)];
     const hdrs = {
         'User-Agent': ua,
@@ -72,13 +73,8 @@ async function nlReadTopic(baseUrl, cookie, topic, fast = false) {
         'Cache-Control': 'no-cache',
         'Pragma': 'no-cache'
     };
-    const loadCtrl = new AbortController();
-    const loadTid = setTimeout(() => loadCtrl.abort(), 15000);
-    let resp;
-    try {
-        resp = await fetch(baseUrl + '/t/' + topic.id, { headers: hdrs, signal: loadCtrl.signal });
-    } catch(e) { clearTimeout(loadTid); return { ok: false, cookieError: '', readTime: 0 }; }
-    clearTimeout(loadTid);
+    const resp = await safeFetchTimeout(baseUrl + '/t/' + topic.id, { headers: hdrs }, 15000);
+    if (!resp) return { ok: false, cookieError: '', readTime: 0 };
     if (!resp.ok) return { ok: false, cookieError: '', readTime: 0 };
 
     // 检查 Cookie 是否失效
@@ -90,19 +86,12 @@ async function nlReadTopic(baseUrl, cookie, topic, fast = false) {
     // 优先从 HTML meta 提取 CSRF，部分 Discourse 没有则从 /session/csrf API 获取
     let csrf = (html.match(/csrf-token" content="([^"]+)"/) || [])[1];
     if (!csrf) {
-        try {
-            const ctrl = new AbortController();
-            const tid2 = setTimeout(() => ctrl.abort(), 8000);
-            const csrfResp = await fetch(baseUrl + '/session/csrf', {
-                headers: { 'User-Agent': ua, 'Cookie': cookie, 'Accept': 'application/json' },
-                signal: ctrl.signal
-            });
-            clearTimeout(tid2);
-            if (csrfResp.ok) {
-                const csrfData = await csrfResp.json();
-                csrf = csrfData.csrf || '';
-            }
-        } catch(e) {}
+        const csrfResp = await safeFetchTimeout(baseUrl + '/session/csrf', {
+            headers: { 'User-Agent': ua, 'Cookie': cookie, 'Accept': 'application/json' }
+        }, 8000);
+        if (csrfResp && csrfResp.ok) {
+            try { const d = await csrfResp.json(); csrf = d.csrf || ''; } catch(e) {}
+        }
     }
     // 如果还是没有 csrf，从 cookie 提取 _t
     if (!csrf) {
