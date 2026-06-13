@@ -69,7 +69,7 @@ wrangler deploy
 https://raw.githubusercontent.com/Linsars/Surge/main/sg/glados.yaml
 ```
 
-> 💡 本模块基于 Surge 语法编写，在 **Egern** 中亦可使用。
+> 💡 本模块为 Surge 模块格式，在 **Egern** 中亦可使用（用法相同）。
 
 **支持的站点：**
 - `glados.network` / `glados.rocks` 等 GLaDOS 变体
