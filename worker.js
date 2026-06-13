@@ -364,6 +364,12 @@ async function handleCallback(callbackQuery, env, origin) {
         await tgEdit(chatId, messageId, "⏳ <b>正在获取全部账户信息...</b>\n\n<i>(系统将全自动查询，请稍候)</i>", null, env);
         await executeTask({ type: 'view_all', chatId, userId, startIndex: 0, plan: null, successList: [] }, env, origin);
     }
+    // --- 单个账户管理 ---
+    else if (data === 'list_manage') {
+        const accounts = await getAccounts(userId, env);
+        if (accounts.length === 0) return tgSend(chatId, "❌ 您还没添加任何账号。", env);
+        await showAccountList(chatId, messageId, userId, 'manage', env);
+    }
     // --- 积分兑换 ---
     else if (data === 'exchange_menu') {
         const kb = {
@@ -1038,11 +1044,14 @@ async function getAccountDataObj(acc, doCheckin = false) {
             if (pointsRes && pointsRes.code === 0) {
                 balanceNum = parseInt(pointsRes.points || 0);
                 if (pointsRes.history && pointsRes.history.length > 0) {
-                    let lastRecord = pointsRes.history[0];
-                    if (lastRecord.detail === todayStr) {
-                        checkedInToday = true;
-                        changeStr = parseInt(lastRecord.change || 0).toString();
-                        if (!changeStr.startsWith('-') && changeStr !== '0') changeStr = '+' + changeStr;
+                    // 遍历历史，找今日第一条签到记录（history[0] 可能是兑换记录）
+                    for (const record of pointsRes.history) {
+                        if (record.business === 'system:checkin' && record.detail === todayStr) {
+                            checkedInToday = true;
+                            changeStr = parseInt(record.change || 0).toString();
+                            if (!changeStr.startsWith('-') && changeStr !== '0') changeStr = '+' + changeStr;
+                            break;
+                        }
                     }
                 }
             }
