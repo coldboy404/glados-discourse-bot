@@ -185,14 +185,42 @@ const SITE_NAMES = { NL: 'NodeLoc', NS: 'NodeSeek', LD: 'LinuxDO' };
 
 async function getHealthSummary(userId, env) {
     const lines = [];
-    for (const [pfx, name] of Object.entries(SITE_NAMES)) {
-        const s = await nlGetState(userId, env, pfx);
-        if (!s.lastRead && !s.readTotal) { lines.push('⚪ ' + name + ' 未绑定'); continue; }
-        lines.push((s.failCount || 0) >= 5
-            ? '🔴 ' + name + ' ×' + (s.failCount||0) + ' 连续失败（Cookie 可能已失效）'
-            : '🟢 ' + name + ' 正常 | 已读 ' + (s.readTotal||0) + ' 帖');
+    // GLaDOS
+    const accts = await getAccounts(userId, env);
+    const glados = accts.filter(function(a){ return a.domain !== 'nodeloc.com' && a.domain !== 'nodeseek.cc' && a.domain !== 'linux.do'; });
+    if (glados.length > 0) {
+        const ok = glados.filter(function(a){ return a.cronSuccess !== false; }).length;
+        const bad = glados.filter(function(a){ return a.cronSuccess === false; }).length;
+        if (bad > 0) {
+            lines.push('🟡 GLaDOS ' + ok + '/' + glados.length + ' 正常，' + bad + ' 失败');
+        } else {
+            lines.push('🟢 GLaDOS ' + glados.length + ' 个账号已绑定');
+        }
+    } else {
+        lines.push('⚪ GLaDOS 未绑定账号');
     }
-    lines.push('━━━━━━━━━━━━━━');
+    // Discourse 阅读站
+    const sites = [
+        { domain: 'nodeloc.com', pfx: 'NL', name: 'NodeLoc' },
+        { domain: 'nodeseek.cc', pfx: 'NS', name: 'NodeSeek' },
+        { domain: 'linux.do',    pfx: 'LD', name: 'LinuxDO' }
+    ];
+    for (const site of sites) {
+        const siteAccts = accts.filter(function(a){ return a.domain === site.domain; });
+        if (siteAccts.length === 0) {
+            lines.push('⚪ ' + site.name + ' 未绑定');
+            continue;
+        }
+        const s = await nlGetState(userId, env, site.pfx);
+        const label = site.name + (siteAccts.length > 1 ? '(' + siteAccts.length + ')' : '');
+        if (s.cookieError) {
+            lines.push('🔴 ' + label + ' Cookie 失效');
+        } else if ((s.failCount || 0) >= 5) {
+            lines.push('🟡 ' + label + ' 连续 ' + s.failCount + ' 次失败');
+        } else {
+            lines.push('🟢 ' + label + ' 正常 | 已读 ' + (s.readTotal || 0) + ' 帖');
+        }
+    }
     return lines.join('\n');
 }
 
@@ -754,8 +782,9 @@ async function handleCallback(callbackQuery, env, origin) {
                 if(st.date===today)st.readsToday=(st.readsToday||0)+ok;else{st.date=today;st.readsToday=ok;}
                 st.readTotal=(st.readTotal||0)+ok;st.totalReadTime=(st.totalReadTime||0)+totalMs;
                 st.failCount = ok > 0 ? 0 : (st.failCount||0) + 1;
-                st.failAlerted = false;
+                if (ok > 0) st.failAlerted = false;
                 await env.GLADOS_DB.put('NL_STATE_'+userId,JSON.stringify(st));
+                await checkAndAlert(userId, st, 'NL', env);
                 await fetch('https://api.telegram.org/bot'+env.BOT_TOKEN+'/editMessageText',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_id:chatId,message_id:mid,text:'✅ NL 完成 '+ok+'/5 | 跳过 '+skipped+' | ⏱ '+Math.round(totalMs/1000)+'s | 📚 累计 '+st.readTotal+'帖(今'+st.readsToday+')',parse_mode:'HTML'})});
             } catch(e) {
                 mt('❌ 致命: '+(e.message||e));
@@ -796,8 +825,9 @@ async function handleCallback(callbackQuery, env, origin) {
                 if(st.date===today)st.readsToday=(st.readsToday||0)+ok;else{st.date=today;st.readsToday=ok;}
                 st.readTotal=(st.readTotal||0)+ok;st.totalReadTime=(st.totalReadTime||0)+totalMs;
                 st.failCount = ok > 0 ? 0 : (st.failCount||0) + 1;
-                st.failAlerted = false;
+                if (ok > 0) st.failAlerted = false;
                 await env.GLADOS_DB.put('NS_STATE_'+userId,JSON.stringify(st));
+                await checkAndAlert(userId, st, 'NS', env);
                 await fetch('https://api.telegram.org/bot'+env.BOT_TOKEN+'/editMessageText',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_id:chatId,message_id:mid,text:'✅ 完成 '+ok+'/5 | 跳过 '+skipped+' | ⏱ '+Math.round(totalMs/1000)+'s | 📚 累计 '+st.readTotal+'帖(今'+st.readsToday+')',parse_mode:'HTML'})});
             } catch(e) {
                 mt('❌ 致命: '+(e.message||e));
@@ -839,8 +869,9 @@ async function handleCallback(callbackQuery, env, origin) {
                 if(st.date===today)st.readsToday=(st.readsToday||0)+ok;else{st.date=today;st.readsToday=ok;}
                 st.readTotal=(st.readTotal||0)+ok;st.totalReadTime=(st.totalReadTime||0)+totalMs;
                 st.failCount = ok > 0 ? 0 : (st.failCount||0) + 1;
-                st.failAlerted = false;
+                if (ok > 0) st.failAlerted = false;
                 await env.GLADOS_DB.put('LD_STATE_'+userId,JSON.stringify(st));
+                await checkAndAlert(userId, st, 'LD', env);
                 await fetch('https://api.telegram.org/bot'+env.BOT_TOKEN+'/editMessageText',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_id:chatId,message_id:mid,text:'✅ LD 完成 '+ok+'/5 | 跳过 '+skipped+' | ⏱ '+Math.round(totalMs/1000)+'s | 📚 累计 '+st.readTotal+'帖(今'+st.readsToday+')',parse_mode:'HTML'})});
             } catch(e) {
                 mt('❌ 致命: '+(e.message||e));
@@ -1354,10 +1385,25 @@ async function handleScheduled(env) {
             for (let acc of accounts) {
                 if (acc.domain === 'nodeloc.com' || acc.domain === 'nodeseek.cc' || acc.domain === 'linux.do') { if (acc.domain === 'nodeloc.com') nlAcc = acc; continue; }
                 const reqOpts = { headers: { ...HEADERS, 'cookie': acc.cookie, 'origin': `https://${acc.domain}` } };
-                await safeFetchJson(`https://${acc.domain}/api/user/checkin`, {
+                const result = await safeFetchJson(`https://${acc.domain}/api/user/checkin`, {
                     ...reqOpts, method: 'POST', body: JSON.stringify({ token: acc.domain })
                 });
+                acc.cronSuccess = result && (result.code === 0 || result.message);
+                acc.cronMsg = result ? (result.message || JSON.stringify(result).slice(0, 60)) : '超时/无响应';
                 await new Promise(r => setTimeout(r, 600));
+            }
+            await env.GLADOS_DB.put('USER_' + userId, JSON.stringify(accounts));
+            const gladosBad = accounts.filter(function(a){ return a.cronSuccess === false; });
+            if (gladosBad.length > 0) {
+                var names = gladosBad.map(function(a){ return a.email || a.username || '?'; }).join(', ');
+                fetch('https://api.telegram.org/bot' + env.BOT_TOKEN + '/sendMessage', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        chat_id: env.ADMIN_ID,
+                        text: '⚠️ <b>GLaDOS ' + gladosBad.length + ' 个账号签到失败</b>\n' + names,
+                        parse_mode: 'HTML'
+                    })
+                }).catch(function(){});
             }
             const gladosCount = accounts.filter(a => a.domain !== 'nodeloc.com' && a.domain !== 'nodeseek.cc' && a.domain !== 'linux.do').length;
             const nlStats = await nlGetDailyStats(userId, env);
@@ -1472,7 +1518,7 @@ async function getAccountDataObj(acc, doCheckin = false) {
     const reqOpts = { headers: { ...HEADERS, 'cookie': acc.cookie, 'origin': `https://${acc.domain}` } };
     let data = {
         statusMsg: "❌ 获取超时或受限", trafficStr: "获取失败", medal: "🪙", 
-        pointsStr: "0", timeLeft: "0", planStr: "未知"
+        pointsStr: "0", timeLeft: "0", planStr: "未知", cookieValid: false
     };
 
     try {
@@ -1488,6 +1534,7 @@ async function getAccountDataObj(acc, doCheckin = false) {
         let pointsRes = await safeFetchJson(`https://${acc.domain}/api/user/points`, reqOpts);
 
         if (statusRes && statusRes.code === 0 && statusRes.data) {
+            data.cookieValid = true;
             data.timeLeft = parseInt(statusRes.data.leftDays || 0).toString();
             data.planStr = VIP_MAP[statusRes.data.vip] || `VIP${statusRes.data.vip}`;
 
@@ -1554,6 +1601,7 @@ function formatAccountString(acc, index, total, pref, data, includeStatus = true
     if (!isSingle) str += `〰️〰️〰️〰️〰️〰️〰️〰️〰️〰️〰️〰️\n[${index}/${total}] `;
     str += `📧 ${maskEmail(acc.email, pref.showEmail)}\n`;
     str += ` ├ 🌐 站点: ${acc.domain.replace(/\./g, '.\u200b')}\n`;
+    str += ` ├ 🍪 Cookie: ${data.cookieValid ? '✅ 有效' : '❌ 已失效'}\n`;
     if (includeStatus) str += ` ├ 📝 状态: ${data.statusMsg}\n`;
     str += ` ├ 📊 流量: ${data.trafficStr}\n`;
     str += ` ├ ${data.medal} 积分: ${data.pointsStr}\n`;
@@ -1586,7 +1634,7 @@ function maskEmail(email, show) {
 async function sendMainMenu(chatId, userId, env, messageId = null) {
     const pref = await getPref(userId, env);
     const health = await getHealthSummary(userId, env);
-    const text = "🤖 <b>GLaDOS 机场管理助手</b>\n\n" + health + "请选择操作：";
+    const text = "🤖 <b>GLaDOS 机场管理助手</b>\n\n" + health + "\n\n请选择操作：";
     const kb = {
         inline_keyboard: [
             [{ text: "👤 1. 账户管理", callback_data: "account_mgr_menu" }],
