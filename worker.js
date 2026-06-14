@@ -1,4 +1,4 @@
-// _worker.js - Cloudflare Pages 高级模式脚本 (修复多域名签到Token与时区对齐版)
+// GLaDOS Bot + Discourse 多站自动阅读 - https://github.com/Linsars/glados-discourse-bot
 
 const VIP_MAP = { 0: "Free", 10: "Free", 11: "Edu", 21: "Basic", 31: "Pro", 41: "Team", 51: "Enterprise" };
 const LIMIT_MAP = { 0: 10, 10: 10, 11: 100, 21: 200, 31: 500, 41: 2000, 51: 5000 };
