@@ -472,7 +472,6 @@ async function handleMessage(message, env, origin) {
     else if (state === 'AWAITING_NODESEEK_COOKIE') await processAddAccountInfo(chatId, userId, text, env);
     else if (state === 'AWAITING_LINUXDO_COOKIE') await processAddAccountInfo(chatId, userId, text, env);
     else if (state === 'AWAITING_UPDATE_COOKIE') await processUpdateCookie(chatId, userId, text, env);
-    else if (state === 'AWAITING_PROXY_URL') await processProxyUrl(chatId, userId, text, env);
     else if (state === 'AWAITING_CRON_TIME') await processCronTime(chatId, userId, text, env);
     else if (state === 'AWAITING_NEW_SITE') await processNewSite(chatId, userId, text, env);
     else if (state === 'AWAITING_DELETE_SITE') await processDeleteSite(chatId, userId, text, env);
@@ -661,11 +660,9 @@ async function handleCallback(callbackQuery, env, origin) {
             var kbRows = [
                 [{ text: "👁️ 查看此账户信息", callback_data: `view_acc_${index}` },
                  { text: isDiscourse ? "📖 立即单独阅读" : "✅ 立即单独签到", callback_data: isDiscourse ? `rd_acc_${index}` : `chk_acc_${index}` }],
-                [{ text: "🔁 更新 Cookies", callback_data: `upd_acc_${index}` }]
+                [{ text: "🔁 更新 Cookies", callback_data: `upd_acc_${index}` }, { text: "❌ 删除", callback_data: `del_acc_${index}` }],
+                [{ text: "🔙 返回账号列表", callback_data: "list_manage" }]
             ];
-            if (isDiscourse) kbRows[1].push({ text: "🌐 Proxy", callback_data: `proxy_acc_${index}` });
-            kbRows[1].push({ text: "❌ 删除", callback_data: `del_acc_${index}` });
-            kbRows.push([{ text: "🔙 返回账号列表", callback_data: "list_manage" }]);
             const kb = { inline_keyboard: kbRows };
             await tgEdit(chatId, messageId, `⚙️ <b>管理账户</b>\n\n当前账户：<code>${maskEmail(acc.email || acc.username || '?', pref.showEmail)}</code>\n所属站点：<code>${acc.domain}</code>\n\n请选择操作：`, kb, env);
         } else if (action === 'exchange') {
@@ -934,15 +931,6 @@ async function handleCallback(callbackQuery, env, origin) {
         await env.GLADOS_DB.put(`STATE_${userId}`, 'AWAITING_UPDATE_COOKIE', { expirationTtl: 300 });
         await env.GLADOS_DB.put(`TEMP_${userId}`, index.toString(), { expirationTtl: 300 });
         await tgSend(chatId, `🔁 <b>请直接回复新的 Cookie 内容：</b>`, env);
-    }
-    else if (data.startsWith('proxy_acc_')) {
-        const index = parseInt(data.split('_')[2]);
-        const accounts = await getAccounts(userId, env);
-        const acc = accounts[index];
-        const curProxy = acc.proxyUrl ? '当前：<code>' + acc.proxyUrl + '</code>\n\n' : '';
-        await env.GLADOS_DB.put(`STATE_${userId}`, 'AWAITING_PROXY_URL', { expirationTtl: 300 });
-        await env.GLADOS_DB.put(`TEMP_${userId}`, index.toString(), { expirationTtl: 300 });
-        await tgSend(chatId, `${curProxy}🌐 <b>配置 Sidecar Proxy 地址</b>\n\n发送 Proxy URL 即可，例如：\n<code>https://ld-proxy.onrender.com</code>\n\n发送 <code>/clear</code> 清除当前 Proxy 配置。`, env);
     }
     else if (data === 'add_nodeloc') {
         await env.GLADOS_DB.put(`STATE_${userId}`, 'AWAITING_NODELOC_COOKIE', { expirationTtl: 300 });
@@ -1239,34 +1227,6 @@ async function processUpdateCookie(chatId, userId, text, env) {
     const data = await getAccountDataObj(accounts[index], true);
     const msgStr = formatAccountString(accounts[index], index + 1, accounts.length, pref, data, true, true);
     await tgSend(chatId, msgStr, env, { inline_keyboard: [[{ text: "🔙 返回账户管理", callback_data: "list_manage" }]] });
-}
-
-async function processProxyUrl(chatId, userId, text, env) {
-    const indexStr = await env.GLADOS_DB.get(`TEMP_${userId}`);
-    await env.GLADOS_DB.delete(`STATE_${userId}`);
-    await env.GLADOS_DB.delete(`TEMP_${userId}`);
-
-    if (!indexStr) return tgSend(chatId, "❌ 会话过期。", env);
-    const index = parseInt(indexStr);
-    const accounts = await getAccounts(userId, env);
-    if (!accounts[index]) return tgSend(chatId, "❌ 账号不存在", env);
-
-    if (text === '/clear') {
-        delete accounts[index].proxyUrl;
-        await env.GLADOS_DB.put(`USER_${userId}`, JSON.stringify(accounts));
-        return tgSend(chatId, "✅ Proxy 已清除。", env, { inline_keyboard: [[{ text: "🔙 返回", callback_data: "list_manage" }]] });
-    }
-
-    let url = text.trim();
-    try {
-        new URL(url); // validate URL
-    } catch(e) {
-        return tgSend(chatId, "❌ URL 格式无效，请发送完整 URL（以 https:// 开头）。", env);
-    }
-
-    accounts[index].proxyUrl = url;
-    await env.GLADOS_DB.put(`USER_${userId}`, JSON.stringify(accounts));
-    await tgSend(chatId, `✅ Proxy 已配置：<code>${url}</code>\n\nLD 请求将自动通过此 Proxy 转发。`, env, { inline_keyboard: [[{ text: "🔙 返回账户管理", callback_data: "list_manage" }]] });
 }
 
 async function processNewSite(chatId, userId, text, env) {
