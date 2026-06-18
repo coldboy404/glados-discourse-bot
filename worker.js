@@ -65,7 +65,11 @@ async function nlRefreshQueue(baseUrl, cookie, state) {
     // 1. Try /unread.json — topics with unread posts
     let r = await safeFetchTimeout(baseUrl + '/unread.json', { headers: hdrs }, 10000);
     if (r && r.ok) {
-        const d = await r.json().catch(() => ({}));
+        const body = await r.text();
+        if (body.includes('not_logged_in') || body.includes('您需要登录')) {
+            return { topics: [], source: 'cookieDead' };
+        }
+        const d = JSON.parse(body);
         const topics = (d.topic_list?.topics || []).filter(t => !t.pinned && t.id);
         if (topics.length > 0) return { topics: topics.map(t => ({ id: t.id, title: t.title || '话题#'+t.id })), source: 'unread' };
     }
@@ -73,7 +77,11 @@ async function nlRefreshQueue(baseUrl, cookie, state) {
     // 2. Try /new.json — brand new topics
     r = await safeFetchTimeout(baseUrl + '/new.json', { headers: hdrs }, 10000);
     if (r && r.ok) {
-        const d = await r.json().catch(() => ({}));
+        const body = await r.text();
+        if (body.includes('not_logged_in') || body.includes('您需要登录')) {
+            return { topics: [], source: 'cookieDead' };
+        }
+        const d = JSON.parse(body);
         const topics = (d.topic_list?.topics || []).filter(t => !t.pinned && t.id);
         if (topics.length > 0) return { topics: topics.map(t => ({ id: t.id, title: t.title || '话题#'+t.id })), source: 'new' };
     }
@@ -295,6 +303,12 @@ async function runNodelocBatch(userId, cookie, env, baseUrl = NL_BASE, fast = fa
                 if (res.source === 'allRead') {
                     state._lastError = '全站话题已读完';
                     state.allRead = true;
+                    break;
+                }
+                if (res.source === 'cookieDead') {
+                    state._lastError = 'Cookie 已过期，请重新绑定';
+                    state.cookieError = '未登录';
+                    state.failCount = (state.failCount || 0) + 1;
                     break;
                 }
                 if (res.topics.length === 0) {
