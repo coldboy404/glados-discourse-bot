@@ -1,5 +1,4 @@
-# wrangler.toml
-name = 'glados-discourse-bot'
+name = "glados-bot"
 main = "worker.js"
 compatibility_date = "2026-04-30"
 workers_dev = true
@@ -10,5 +9,6 @@ keep_vars = true
 binding = "GLADOS_DB"
 
 [triggers]
-crons = ["0 * * * *"]
+# 每小时执行签到；每分钟仅检查 BOT_TOKEN 是否变化并自动重设既有 webhook。
+crons = ["0 * * * *", "* * * * *"]
 

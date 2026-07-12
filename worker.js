@@ -91,6 +91,62 @@ async function getHealthSummary(userId, env) {
 }
 
 
+// Cloudflare 不会在变量保存时执行 Worker 代码。每分钟的轻量 Cron 会检测
+// BOT_TOKEN 是否变化；新 Token 继承同一 Bot 的既有 webhook 地址后，自动重新注册。
+async function telegramApi(env, method, body) {
+    if (!env.BOT_TOKEN) return { ok: false, description: 'BOT_TOKEN 未配置' };
+    try {
+        const response = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/${method}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: body ? JSON.stringify(body) : undefined
+        });
+        return await response.json();
+    } catch (e) {
+        return { ok: false, description: String(e && e.message || e) };
+    }
+}
+
+async function botTokenFingerprint(token) {
+    const input = new TextEncoder().encode(String(token));
+    const digest = await crypto.subtle.digest('SHA-256', input);
+    return Array.from(new Uint8Array(digest)).map(function(byte) {
+        return byte.toString(16).padStart(2, '0');
+    }).join('');
+}
+
+async function reconcileTelegramWebhook(env) {
+    if (!env.BOT_TOKEN || !env.GLADOS_DB) return;
+    const fingerprint = await botTokenFingerprint(env.BOT_TOKEN);
+    const savedFingerprint = await env.GLADOS_DB.get('SYSTEM_BOT_TOKEN_FINGERPRINT');
+    if (savedFingerprint === fingerprint) return;
+
+    // getWebhookInfo 使用新 Token 读取同一个 Bot 已保存的地址，避免把 Workers
+    // 域名硬编码到代码或要求用户访问 /setup。
+    const webhookInfo = await telegramApi(env, 'getWebhookInfo');
+    const webhookUrl = webhookInfo && webhookInfo.result && webhookInfo.result.url;
+    if (!webhookInfo.ok || !/^https:\/\/.+\/webhook(?:\?.*)?$/.test(String(webhookUrl || ''))) {
+        console.log('Webhook 自动恢复跳过：新 Token 没有可继承的 HTTPS webhook 地址');
+        return;
+    }
+
+    const [webhookResult, deleteCommandsResult, commandsResult] = await Promise.all([
+        telegramApi(env, 'setWebhook', { url: webhookUrl, allowed_updates: ['message', 'callback_query'] }),
+        telegramApi(env, 'deleteMyCommands'),
+        telegramApi(env, 'setMyCommands', { commands: [{ command: 'start', description: '启动机器人' }] })
+    ]);
+    if (webhookResult.ok && deleteCommandsResult.ok && commandsResult.ok) {
+        await env.GLADOS_DB.put('SYSTEM_BOT_TOKEN_FINGERPRINT', fingerprint);
+        console.log('Telegram webhook 已随 BOT_TOKEN 更新自动恢复');
+    } else {
+        console.log('Webhook 自动恢复失败', JSON.stringify({
+            webhook: webhookResult.description,
+            deleteCommands: deleteCommandsResult.description,
+            commands: commandsResult.description
+        }));
+    }
+}
+
 export default {
     async fetch(request, env, ctx) {
         const url = new URL(request.url);
@@ -150,7 +206,11 @@ export default {
     },
 
     async scheduled(event, env, ctx) {
-        ctx.waitUntil(handleScheduled(env));
+        if (event.cron === '0 * * * *') {
+            ctx.waitUntil(handleScheduled(env));
+        } else {
+            ctx.waitUntil(reconcileTelegramWebhook(env));
+        }
     }
 };
 
