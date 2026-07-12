@@ -20,23 +20,22 @@ Telegram bot，自动签到 GLaDOS、NodeLoc 与 NodeSeek；支持多账号 Cook
 
 > ⚠️  按钮需要 `wrangler.toml` 的 `kv_namespaces` 里**不要写** `id` 字段（包括 `id = ""`），否则按钮页面报"无法获取存储库内容"。
 
-### 自动部署更新
+### Cloudflare GitHub 自动部署
 
-[![Auto Deploy](https://github.com/coldboy404/glados-discourse-bot/actions/workflows/deploy.yml/badge.svg)](https://github.com/coldboy404/glados-discourse-bot/actions/workflows/deploy.yml)
+本项目使用 Cloudflare Dashboard 的 GitHub 集成部署。Cloudflare 默认执行 `npx wrangler deploy`，每次仓库更新后会自动部署 `worker.js`。
 
-设好以下 Secret 后，每次推 `worker.js` 到 `main` 自动更新 CF 上的代码，并自动把 Telegram 配置同步到 Worker，不需要再去 Cloudflare 重填：
+请只在 Cloudflare Dashboard 中配置一次以下变量：
 
-> 仓库 Settings → Secrets and variables → Actions
+`Workers & Pages` → `glados-bot` → `Settings` → `Variables and Secrets`
 
-| Secret | 哪里拿 |
-|--------|--------|
-| `CF_API_TOKEN` | Cloudflare Dashboard → 我的 API 令牌 → 创建令牌（Workers 编辑权限） |
-| `CF_ACCOUNT_ID` | Cloudflare Dashboard → 右侧边栏 → 账户 ID |
-| `KV_NS_ID` | 一键部署后，在 Worker 的设置 → KV 里能看到 `GLADOS_DB` 的 Namespace ID |
-| `BOT_TOKEN` | Telegram BotFather 创建机器人后得到的 Token |
-| `ADMIN_ID` | 你的 Telegram 用户 ID |
+| 名称 | 类型 | 值 |
+|------|------|----|
+| `BOT_TOKEN` | Secret | Telegram BotFather 的机器人 Token |
+| `ADMIN_ID` | Secret 或 Text | 你的 Telegram 用户 ID |
 
-未配置完整 Secret 时，GitHub Actions 会主动终止部署并提示缺少变量；首次使用请一次性配置上表全部 5 项。
+这两个变量已经从 `wrangler.toml` 中移除，不会再被仓库更新中的占位值覆盖。以后 GitHub 有新提交时，Cloudflare 自动部署代码，但会保留 Dashboard 中已保存的变量。
+
+如果 Cloudflare 的构建设置里手动填写了 `npx wrangler deploy`，保持即可；不要把 `BOT_TOKEN` 或 `ADMIN_ID` 写回 `wrangler.toml`。
 
 ## 绑定账号
 

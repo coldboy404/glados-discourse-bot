@@ -3,10 +3,6 @@ main = "worker.js"
 compatibility_date = "2026-04-30"
 workers_dev = true
 
-[vars]
-ADMIN_ID = "你的Telegram用户ID"
-BOT_TOKEN = "Telegram Bot Token"
-
 [[kv_namespaces]]
 binding = "GLADOS_DB"
 
