@@ -58,7 +58,7 @@ fi
 RESP=$(curl -s --max-time 60 -X PUT \
     -H "Authorization: Bearer ${CF_API_TOKEN}" \
     -F "metadata=@/tmp/meta.json;type=application/json" \
-    -F "script=@${SCRIPT_PATH};filename=worker.js;type=application/javascript+module" \
+    -F "worker.js=@${SCRIPT_PATH};type=application/javascript+module" \
     "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/workers/scripts/glados-bot")
 
 SUCCESS=$(echo "$RESP" | jq -r '.success // false')
@@ -89,6 +89,6 @@ echo "  4. （可选）添加 NodeLoc / NodeSeek："
 echo "     账户管理 → 添加账户 → NodeLoc / NodeSeek 自动签到"
 echo ""
 echo "  5. 测试："
-echo"     查看所有账户信息"
+echo "     查看所有账户信息"
 echo ""
 echo "🎉 搞定！"

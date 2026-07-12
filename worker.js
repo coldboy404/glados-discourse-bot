@@ -223,9 +223,13 @@ async function runNodeseekCheckin(cookie) {
     if (response.status === 401 || response.status === 403) return { ok: false, cookieError: '未登录或 Cloudflare 验证', message: 'Cookie 已失效或需刷新 cf_clearance' };
     const raw = await response.text();
     const data = (() => { try { return JSON.parse(raw); } catch(e) { return {}; } })();
-    const message = data.message || data.msg || raw.slice(0, 100) || ('HTTP ' + response.status);
-    const already = /已完成|已签到|重复|already/i.test(message);
-    return { ok: response.ok && (data.success === true || already), already, points: data.gain || '', current: data.current || '', message, cookieError: '' };
+    const message = data.message || data.msg || raw.slice(0, 120) || ('HTTP ' + response.status);
+    const messageText = String(message).toLowerCase();
+    const already = /已完成|已签到|重复|already|today/i.test(messageText);
+    const successText = /成功|完成|签到|success|check.?in|observation logged|tomorrow/i.test(messageText);
+    const failedText = /失败|错误|禁止|无权限|登录|过期|fail|error|unauthorized|forbidden/i.test(messageText);
+    const ok = response.ok && (data.success === true || already || (!failedText && (successText || data.gain !== undefined || data.current !== undefined)));
+    return { ok, already, points: data.gain || '', current: data.current || '', message, cookieError: '' };
 }
 
 async function runForumCheckin(acc) {
@@ -244,7 +248,8 @@ async function nlRefreshQueue(baseUrl, cookie, state) {
         if (body.includes('not_logged_in') || body.includes('您需要登录')) {
             return { topics: [], source: 'cookieDead' };
         }
-        const d = JSON.parse(body);
+        let d;
+        try { d = JSON.parse(body); } catch (e) { return { topics: [], source: 'error' }; }
         const topics = (d.topic_list?.topics || []).filter(t => !t.pinned && t.id);
         if (topics.length > 0) return { topics: topics.map(t => ({ id: t.id, title: t.title || '话题#'+t.id })), source: 'unread' };
     }
@@ -256,7 +261,8 @@ async function nlRefreshQueue(baseUrl, cookie, state) {
         if (body.includes('not_logged_in') || body.includes('您需要登录')) {
             return { topics: [], source: 'cookieDead' };
         }
-        const d = JSON.parse(body);
+        let d;
+        try { d = JSON.parse(body); } catch (e) { return { topics: [], source: 'error' }; }
         const topics = (d.topic_list?.topics || []).filter(t => !t.pinned && t.id);
         if (topics.length > 0) return { topics: topics.map(t => ({ id: t.id, title: t.title || '话题#'+t.id })), source: 'new' };
     }
@@ -494,6 +500,11 @@ async function runNodelocBatch(userId, cookie, env, baseUrl = NL_BASE, fast = fa
                     state.cookieError = '';
                     break;
                 }
+                if (res.source === 'error') {
+                    state._lastError = '话题接口返回非 JSON';
+                    state.failCount = (state.failCount || 0) + 1;
+                    break;
+                }
                 if (res.topics.length === 0) {
                     state._lastError = '刷新队列返回空';
                     state.failCount = (state.failCount || 0) + 1;
@@ -587,47 +598,37 @@ export default {
             return new Response('OK');
         }
         
-        if (url.pathname === '/setup') {
-            if (!env.BOT_TOKEN) return new Response('请先配置 BOT_TOKEN');
-            const webhookUrl = `https://${url.hostname}/webhook`;
-            await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/setWebhook?url=${webhookUrl}`);
-            const commands = [{ command: "start", description: "启动/重置机器人菜单" }];
-            const tgData = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/setMyCommands`, {
-                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ commands })
-            }).then(r => r.json());
-
-            return new Response(JSON.stringify(tgData), { headers: { 'Content-Type': 'application/json' } });
-        }
-        
-        if (url.pathname === '/debug') {
+        if (url.pathname === '/setup' || url.pathname === '/debug') {
+            if (!env.BOT_TOKEN || request.headers.get('X-Bot-Token') !== env.BOT_TOKEN) {
+                return new Response('Forbidden', { status: 403 });
+            }
+            if (url.pathname === '/setup') {
+                const webhookUrl = `${url.protocol}//${url.hostname}/webhook`;
+                const commands = [{ command: "start", description: "启动/重置机器人菜单" }];
+                const [webhookRes, commandRes] = await Promise.all([
+                    fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/setWebhook?url=${encodeURIComponent(webhookUrl)}`),
+                    fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/setMyCommands`, {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ commands })
+                    })
+                ]);
+                const result = {
+                    webhook: (await webhookRes.json()).ok === true,
+                    commands: (await commandRes.json()).ok === true
+                };
+                return new Response(JSON.stringify(result), { headers: { 'Content-Type': 'application/json' } });
+            }
             const diag = {
-                version: 'nl-unread-20260618',
+                version: 'checkin-20260712',
                 hasKV: typeof env.GLADOS_DB !== 'undefined',
                 hasAdminID: typeof env.ADMIN_ID !== 'undefined',
                 hasBotToken: typeof env.BOT_TOKEN !== 'undefined'
             };
             return new Response(JSON.stringify(diag, null, 2), { headers: { 'Content-Type': 'application/json' } });
         }
-        // 根路径：自动激活 Webhook + 显示状态
-        const setupResult = { webhook: false, commands: false };
-        if (env.BOT_TOKEN) {
-            try {
-                const wh = `${url.protocol}//${url.hostname}/webhook`;
-                const r1 = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/setWebhook?url=${wh}`);
-                setupResult.webhook = (await r1.json()).ok === true;
-                const commands = [{ command: "start", description: "启动/重置机器人菜单" }];
-                const r2 = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/setMyCommands`, {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ commands })
-                });
-                setupResult.commands = (await r2.json()).ok === true;
-            } catch (e) { setupResult.error = e.message; }
-        }
         return new Response(JSON.stringify({
             status: 'running',
             message: 'GLaDOS Bot 链式驱动引擎正常运行中。',
-            webhook: setupResult.webhook ? '✅ 已激活' : '❌ 未激活（请配置 BOT_TOKEN）',
-            commands: setupResult.commands ? '✅ 已注册' : '⚠️ 未注册',
-            note: '发送 /start 开始使用'
+            note: 'Webhook 由受保护的 /setup 路径配置；发送 /start 开始使用'
         }, null, 2), { headers: { 'Content-Type': 'application/json; charset=utf-8' } });
     },
 
@@ -974,7 +975,7 @@ async function handleCallback(callbackQuery, env, origin) {
             await checkAndAlert(userId, state, prefix, env);
             const reward = result.points ? `\n🎁 本次: +${result.points}` : '';
             const balance = result.current ? `\n🍗 当前: ${result.current}` : '';
-            return rp(`${result.ok ? (result.already ? '🔁 今日已签到' : '✅ 签到成功') : '❌ 签到失败'}\n🌐 ${isNodeLocAccount(acc) ? 'NodeLoc' : 'NodeSeek'}\n📝 ${result.message || '未知响应'}${reward}${balance}`);
+            return rp(`${result.ok ? (result.already ? '🔁 今日已签到' : '✅ 签到成功') : '❌ 签到失败'}\n🌐 ${isNodeLocAccount(acc) ? 'NodeLoc' : 'NodeSeek'}\n📝 ${escapeHtml(result.message || '未知响应')}${reward}${balance}`);
         }
         await rp("⏳ 正在为您单独执行签到，请稍候...");
         const pref = await getPref(userId, env);
@@ -986,11 +987,12 @@ async function handleCallback(callbackQuery, env, origin) {
         const index = parseInt(data.split('_')[2]);
         let accounts = await getAccounts(userId, env);
         if (!accounts[index]) return rp("❌ 账号不存在");
-        const deletedEmail = accounts[index].email;
+        const deletedAccount = accounts[index];
+        const deletedEmail = deletedAccount.email;
         accounts.splice(index, 1);
         await env.GLADOS_DB.put(`USER_${userId}`, JSON.stringify(accounts));
-        if (acc.domain === 'nodeloc.com') await env.GLADOS_DB.delete('NL_STATE_' + userId);
-        if (acc.domain === 'nodeseek.com') await env.GLADOS_DB.delete('NS_STATE_' + userId);
+        if (isNodeLocAccount(deletedAccount) && !accounts.some(isNodeLocAccount)) await env.GLADOS_DB.delete('NL_STATE_' + userId);
+        if (isNodeSeekAccount(deletedAccount) && !accounts.some(isNodeSeekAccount)) await env.GLADOS_DB.delete('NS_STATE_' + userId);
         const pref = await getPref(userId, env);
         await tgEdit(chatId, messageId, `✅ 已成功删除账号：<code>${maskEmail(deletedEmail, pref.showEmail)}</code>`, { inline_keyboard: [[{ text: "🔙 返回账户管理", callback_data: "list_manage" }]] }, env);
     }
@@ -1159,7 +1161,7 @@ async function processAddAccountInfo(chatId, userId, text, env) {
 
     // GLaDOS 裸 Cookie：多个官方域名账户互通，统一写入 glados.network；自动查询邮箱并按邮箱覆盖旧 Cookie。
     // 真实 GLaDOS Cookie 形如 koa:sess=...，不要把它误判成其它站点；同时排除 NodeLoc/NodeSeek 的标记。
-    if (text.indexOf('=') > -1 && !/expires=|connect\.sid|_forum_session|pjwt/.test(text)) {
+    if (text.indexOf('=') > -1 && !/expires=|connect\.sid|_forum_session|session=|pjwt/.test(text)) {
         const cookie = normalizeCookie(text);
         let found = null;
         for (const domainCandidate of GLADOS_DOMAINS) {
@@ -1189,7 +1191,16 @@ async function processAddAccountInfo(chatId, userId, text, env) {
     const lines = text.split('\n');
     let accounts = await getAccounts(userId, env);
     let accMap = new Map();
-    accounts.forEach(acc => accMap.set(acc.email.trim().toLowerCase(), acc));
+    accounts.forEach(acc => {
+        const key = `${acc.domain}:${String(acc.email || '').trim().toLowerCase()}`;
+        accMap.set(key, acc);
+    });
+    if (isGladosAccount({ domain }) && lines.some(line => line.includes('koa:sess='))) {
+        const supplied = normalizeCookie(lines.map(line => line.split(':').slice(1).join(':')).join('; '));
+        if (!getCookieValue(supplied, 'koa:sess') || !getCookieValue(supplied, 'koa:sess.sig')) {
+            return rp("❌ GLaDOS Cookie 格式错误：需要同时包含 <code>koa:sess</code> 与 <code>koa:sess.sig</code>。");
+        }
+    }
 
     let added = 0, updated = 0;
     for (let line of lines) {
@@ -1199,10 +1210,12 @@ async function processAddAccountInfo(chatId, userId, text, env) {
             const emailKey = email.toLowerCase();
             const cookie = parts.slice(1).join(':').trim();
             
-            if (accMap.has(emailKey)) updated++;
+            const accountDomain = isGladosAccount({ domain }) ? GLADOS_DOMAIN : domain;
+            const accountKey = `${accountDomain}:${emailKey}`;
+            if (accMap.has(accountKey)) updated++;
             else added++;
             
-            accMap.set(emailKey, { domain, email, cookie });
+            accMap.set(accountKey, { domain: accountDomain, email, cookie });
         }
     }
 
@@ -1682,14 +1695,18 @@ async function saveUserIdForCron(userId, env) {
     usersList = usersList ? JSON.parse(usersList) : [];
     if (!usersList.includes(userId)) { usersList.push(userId); await env.GLADOS_DB.put("ALL_USERS", JSON.stringify(usersList)); }
 }
+function escapeHtml(value) {
+    return String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
 function maskEmail(email, show) {
-    if (show) return email.replace('@', '@\u200b').replace(/\./g, '.\u200b');
+    email = String(email || '?');
+    if (show) return escapeHtml(email.replace('@', '@\u200b').replace(/\./g, '.\u200b'));
     if (email.includes('@')) {
         let [name, domain] = email.split('@');
         let masked = name.length <= 4 ? name + "****" : name.slice(0, 4) + "********";
-        return `${masked}@\u200b${domain.replace(/\./g, '.\u200b')}`;
+        return escapeHtml(`${masked}@\u200b${domain.replace(/\./g, '.\u200b')}`);
     }
-    return email.replace(/\./g, '.\u200b');
+    return escapeHtml(email.replace(/\./g, '.\u200b'));
 }
 
 // ================= 菜单 UI =================
