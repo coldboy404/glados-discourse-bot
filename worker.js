@@ -27,7 +27,7 @@ async function safeFetchTimeout(url, opts, ms = 12000) {
     } catch(e) { return null; }
 }
 
-// ================= NodeLoc / NodeSeek 自动签到 =================
+// NodeLoc / NodeSeek 旧账号只保留查看、更新和删除；纯 Worker 不执行其浏览器签到。
 const NL_BASE = 'https://www.nodeloc.com';
 // NodeSeek 主站是 nodeseek.com；不要把 Cookie 请求发到 www 子域名。
 const NS_BASE = 'https://nodeseek.com';
@@ -168,73 +168,6 @@ function nodelocToday() {
     return beijingNow.toISOString().slice(0, 10);
 }
 
-async function runNodelocCheckin(cookie) {
-    const cleanCookie = normalizeCookie(cookie);
-    if (!getCookieValue(cleanCookie, '_forum_session')) return { ok: false, cookieError: '缺少 _forum_session', message: 'Cookie 格式不完整' };
-
-    // NodeLoc 的 discourse_checkin 路由支持 GET。使用 GET 可避免 POST 的 CSRF 会话不匹配，
-    // 同时能读取“今日已签到”状态；匿名 GET 会明确返回 not_logged_in。
-    const response = await safeFetchTimeout(NL_BASE + '/checkin.json', {
-        method: 'GET',
-        headers: {
-            'User-Agent': HEADERS['User-Agent'],
-            'Cookie': cleanCookie,
-            'Accept': 'application/json, text/plain, */*',
-            'Referer': NL_BASE + '/'
-        }
-    }, 12000);
-    if (!response) return { ok: false, message: '签到请求超时' };
-    const raw = await response.text();
-    const data = (() => { try { return JSON.parse(raw); } catch(e) { return {}; } })();
-    const errorType = String(data.error_type || '').toLowerCase();
-    const message = data.message || data.msg || data.errors?.[0] || raw.slice(0, 120) || ('HTTP ' + response.status);
-    // NodeLoc 的 403 可能是“已签到”、未登录或 BAD CSRF，必须看 body，不能按状态码一概而论。
-    const already = /already|已签|重复|今天已|今日已|today/i.test(String(message)) || /already|已签|重复|今天已|今日已|today/i.test(raw);
-    const notLoggedIn = response.status === 401 || errorType === 'not_logged_in' || /需要登录|not_logged_in|unauthorized/i.test(String(message)) || /需要登录|not_logged_in|unauthorized/i.test(raw);
-    const badCsrf = /bad csrf|csrf/i.test(String(message)) || /bad csrf|csrf/i.test(raw);
-    // Cloudflare HTML 403、未登录 JSON、BAD CSRF 都不能误判为“今日已签到”；只有明确的重复签到文案才算 already。
-    const cookieError = notLoggedIn ? '未登录' : '';
-    const ok = already || (response.ok && data.success !== false && !badCsrf && !notLoggedIn);
-    return { ok, already, points: data.points || data.gain || '', message, cookieError };
-}
-
-async function runNodeseekCheckin(cookie) {
-    const cleanCookie = normalizeCookie(cookie);
-    // NodeSeek 真实 Cookie 形如 session=<id>; pjwt=<JWT>，不是 koa:sess。
-    if (!getCookieValue(cleanCookie, 'session') || !getCookieValue(cleanCookie, 'pjwt')) {
-        return { ok: false, cookieError: 'Cookie 格式不完整', message: '请复制完整 NodeSeek Cookie（需同时包含 session / pjwt）' };
-    }
-    const response = await safeFetchTimeout(NS_API_BASE + '/api/attendance?random=true', {
-        method: 'POST',
-        headers: {
-            'User-Agent': HEADERS['User-Agent'],
-            'Cookie': cleanCookie,
-            'Accept': 'application/json, text/plain, */*',
-            'Origin': NS_API_BASE,
-            'Referer': NS_API_BASE + '/board',
-            'Content-Length': '0'
-        }
-    }, 12000);
-    if (!response) return { ok: false, message: '签到请求超时' };
-    const raw = await response.text();
-    const data = (() => { try { return JSON.parse(raw); } catch(e) { return {}; } })();
-    const isCloudflareChallenge = response.headers.get('cf-mitigated') === 'challenge' || /<!doctype html|<html|just a moment|security verification/i.test(raw);
-    const message = data.message || data.msg || raw.slice(0, 120) || ('HTTP ' + response.status);
-    const messageText = String(message).toLowerCase();
-    const already = /已完成|已签到|重复|already|today/i.test(messageText);
-    const highRisk = /high risk action|risk action/i.test(messageText);
-    const successText = /成功|完成|签到|success|check.?in|observation logged|tomorrow/i.test(messageText);
-    const failedText = /失败|错误|禁止|无权限|登录|过期|fail|error|unauthorized|forbidden/i.test(messageText);
-    const cookieError = response.status === 401 ? '未登录' : '';
-    const ok = response.ok && !isCloudflareChallenge && !highRisk && (data.success === true || already || (!failedText && (successText || data.gain !== undefined || data.current !== undefined)));
-    const reason = isCloudflareChallenge ? 'NodeSeek Cloudflare 挑战，Worker 无法执行 JavaScript 验证' : highRisk ? 'NodeSeek 判定为高风险请求，通常需要浏览器环境' : message;
-    return { ok, already, points: data.gain || '', current: data.current || '', message: reason, cookieError };
-}
-
-async function runForumCheckin(acc) {
-    return isNodeLocAccount(acc) ? runNodelocCheckin(acc.cookie) : runNodeseekCheckin(acc.cookie);
-}
-
 
 // ====== 健康状态系统 ======
 const SITE_NAMES = { NL: 'NodeLoc', NS: 'NodeSeek' };
@@ -255,28 +188,7 @@ async function getHealthSummary(userId, env) {
     } else {
         lines.push('⚪ GLaDOS 未绑定账号');
     }
-    // NodeLoc / NodeSeek 签到站点
-    const sites = [
-        { domain: 'nodeloc.com', pfx: 'NL', name: 'NodeLoc' },
-        { domain: 'nodeseek.com', pfx: 'NS', name: 'NodeSeek' },
-    ];
-    for (const site of sites) {
-        const siteAccts = accts.filter(function(a){ return a.domain === site.domain; });
-        if (siteAccts.length === 0) {
-            lines.push('⚪ ' + site.name + ' 未绑定');
-            continue;
-        }
-        const s = await nlGetState(userId, env, site.pfx);
-        const label = site.name + (siteAccts.length > 1 ? '(' + siteAccts.length + ')' : '');
-        if (s.cookieError) {
-            lines.push('🔴 ' + label + ' Cookie 失效');
-        } else if ((s.failCount || 0) >= 5) {
-            lines.push('🟡 ' + label + ' 连续 ' + s.failCount + ' 次失败');
-        } else {
-            const checked = s.lastCheckinDate === nodelocToday() ? '今日已签到' : '等待签到';
-            lines.push('🟢 ' + label + ' 正常 | ' + checked);
-        }
-    }
+
     return lines.join('\n');
 }
 
@@ -602,11 +514,12 @@ async function handleCallback(callbackQuery, env, origin) {
         if (!acc) return rp("❌ 找不到该账号");
 
         if (action === 'manage') {
-            const isDiscourse = isForumAccount(acc);
+            const actionRow = isForumAccount(acc)
+                ? [{ text: "👁️ 查看此账户信息", callback_data: `view_acc_${index}` }]
+                : [{ text: "👁️ 查看此账户信息", callback_data: `view_acc_${index}` }, { text: "✅ 立即单独签到", callback_data: `chk_acc_${index}` }];
             const kb = {
                 inline_keyboard: [
-                    [{ text: "👁️ 查看此账户信息", callback_data: `view_acc_${index}` },
-                     { text: "✅ 立即单独签到", callback_data: isDiscourse ? `rd_acc_${index}` : `chk_acc_${index}` }],
+                    actionRow,
                     [{ text: "🔁 更新 Cookies", callback_data: `upd_acc_${index}` }, { text: "❌ 删除此账户", callback_data: `del_acc_${index}` }],
                     [{ text: "🔙 返回账号列表", callback_data: "list_manage" }]
                 ]
@@ -628,32 +541,18 @@ async function handleCallback(callbackQuery, env, origin) {
         
         if (acc.domain === 'nodeloc.com') {
             const pref = await getPref(userId, env);
-            const st = await env.GLADOS_DB.get('NL_STATE_' + userId, 'json') || {};
-            let msg = `🌐 <b>NodeLoc 自动签到</b>\n\n`;
+            let msg = `🌐 <b>NodeLoc 旧账号</b>\n\n`;
             msg += `👤 账号: ${maskEmail(acc.email || acc.username || '?', pref.showEmail)}\n`;
-            msg += `━━━━━━━━━━━━━━━━\n`;
-            msg += `📅 今日签到: ${st.lastCheckinDate === nodelocToday() ? (st.lastCheckinMessage || '已完成') : '尚未执行'}\n`;
-            msg += `━━━━━━━━━━━━━━━━\n`;
-            if (st.cookieError) {
-                msg += `⚠️ Cookie 异常: ${st.cookieError}\n`;
-            } else {
-                msg += `✅ Cookie 状态: 正常\n`;
-            }
+            msg += `ℹ️ 该站需要真实浏览器点击签到，纯 Cloudflare Worker 无法执行。\n`;
+            msg += `此账号不会参与手动或定时签到，可继续更新 Cookie 或删除。`;
             return rp(msg);
         }
         if (acc.domain === 'nodeseek.com') {
             const pref = await getPref(userId, env);
-            const st = await env.GLADOS_DB.get('NS_STATE_' + userId, 'json') || {};
-            let msg = `🔹 <b>NodeSeek 自动签到</b>\n\n`;
+            let msg = `🔹 <b>NodeSeek 旧账号</b>\n\n`;
             msg += `👤 账号: ${escapeHtml(displayAccountName(acc))}\n`;
-            msg += `━━━━━━━━━━━━━━━━\n`;
-            msg += `📅 今日签到: ${st.lastCheckinDate === nodelocToday() ? (st.lastCheckinMessage || '已完成') : '尚未执行'}\n`;
-            msg += `━━━━━━━━━━━━━━━━\n`;
-            if (st.cookieError) {
-                msg += `⚠️ Cookie 异常: ${st.cookieError}\n`;
-            } else {
-                msg += `✅ Cookie 状态: 正常\n`;
-            }
+            msg += `ℹ️ 该站需要 Chrome TLS 指纹/Cloudflare 挑战环境，纯 Worker 无法执行。\n`;
+            msg += `此账号不会参与手动或定时签到，可继续更新 Cookie 或删除。`;
             return rp(msg);
         }
         
@@ -670,26 +569,7 @@ async function handleCallback(callbackQuery, env, origin) {
         const pref = await getPref(userId, env);
         if (!acc) return rp("❌ 账号不存在");
         
-        if (isForumAccount(acc)) {
-            await rp(`⏳ 正在执行 ${isNodeLocAccount(acc) ? 'NodeLoc' : 'NodeSeek'} 签到，请稍候...`);
-            const result = await runForumCheckin(acc);
-            const prefix = isNodeLocAccount(acc) ? 'NL' : 'NS';
-            const state = await nlGetState(userId, env, prefix);
-            if (result.ok) {
-                state.cookieError = '';
-                state.failCount = 0;
-                state.failAlerted = false;
-                state.lastCheckinDate = nodelocToday();
-                state.lastCheckinMessage = result.message;
-            } else {
-                state.cookieError = result.cookieError || '';
-                state.failCount = (state.failCount || 0) + 1;
-                state._lastError = result.message;
-            }
-            await nlSaveState(userId, state, env, prefix);
-            await checkAndAlert(userId, state, prefix, env);
-            return rp(formatForumResult(isNodeLocAccount(acc) ? 'NodeLoc' : 'NodeSeek', acc, result, pref));
-        }
+        if (isForumAccount(acc)) return rp('ℹ️ NodeLoc / NodeSeek 需要真实浏览器环境，纯 Cloudflare Worker 已停止执行这两个站点的签到。');
         await rp("⏳ 正在为您单独执行签到，请稍候...");
         const accData = await getAccountDataObj(acc, true); // true 代表触发签到
         const msgStr = formatAccountString(acc, index + 1, accounts.length, pref, accData, true, true);
@@ -713,18 +593,6 @@ async function handleCallback(callbackQuery, env, origin) {
         await env.GLADOS_DB.put(`STATE_${userId}`, 'AWAITING_UPDATE_COOKIE', { expirationTtl: 300 });
         await env.GLADOS_DB.put(`TEMP_${userId}`, index.toString(), { expirationTtl: 300 });
         await rp(`🔁 <b>请直接回复新的 Cookie 内容：</b>`);
-    }
-    else if (data === 'add_nodeloc') {
-        await env.GLADOS_DB.put(`STATE_${userId}`, 'AWAITING_NODELOC_COOKIE', { expirationTtl: 300 });
-        await env.GLADOS_DB.put(`TEMP_${userId}`, 'nodeloc.com', { expirationTtl: 300 });
-        await rp("🌐 <b>绑定 NodeLoc 账号</b>\n\n打开 https://www.nodeloc.com → F12 → Application → Cookies → 右键复制全部 Cookie，直接粘贴发送。\n\nBot 会自动解析。", { inline_keyboard: [[{ text: "🔙 返回", callback_data: "list_manage" }]] });
-    }
-    else if (data === 'add_nodeseek') {
-        await env.GLADOS_DB.put(`STATE_${userId}`, 'AWAITING_NODESEEK_COOKIE', { expirationTtl: 300 });
-        await env.GLADOS_DB.put(`TEMP_${userId}`, 'nodeseek.com', { expirationTtl: 300 });
-        await rp("🔹 <b>绑定 NodeSeek 账号</b>\n\n打开 https://nodeseek.com → F12 → Application → Cookies → 右键复制全部 Cookie，直接粘贴发送。\n\nBot 会自动解析。", { inline_keyboard: [[{ text: "🔙 返回", callback_data: "list_manage" }]] });
-    }
-    else if (data === 'bind_ns') {
     }
     else if (data.startsWith('doexch_')) {
         const parts = data.split('_');
@@ -1057,33 +925,9 @@ async function executeTask(task, env, origin) {
         
         if (type === 'checkin' || type === 'view_all') {
             if (isForumAccount(acc)) {
-                const prefix = isNodeLocAccount(acc) ? 'NL' : 'NS';
-                if (type === 'checkin') {
-                    const result = await runForumCheckin(acc);
-                    const state = await nlGetState(userId, env, prefix);
-                    if (result.ok) {
-                        state.cookieError = '';
-                        state.failCount = 0;
-                        state.failAlerted = false;
-                        state.lastCheckinDate = nodelocToday();
-                        state.lastCheckinMessage = result.message;
-                    } else {
-                        state.cookieError = result.cookieError || '';
-                        state.failCount = (state.failCount || 0) + 1;
-                        state._lastError = result.message;
-                    }
-                    await nlSaveState(userId, state, env, prefix);
-                    await checkAndAlert(userId, state, prefix, env);
+                if (type === 'view_all') {
                     const label = isNodeLocAccount(acc) ? 'NodeLoc' : 'NodeSeek';
-                    const forumMsg = formatForumResult(label, acc, result, pref);
-                    msgs.push(forumMsg);
-                    if (type === 'checkin') newResultList.push(forumMsg);
-                } else {
-                    const state = await nlGetState(userId, env, prefix);
-                    const label = isNodeLocAccount(acc) ? 'NodeLoc' : 'NodeSeek';
-                    const last = state.lastCheckinDate === nodelocToday() ? (state.lastCheckinMessage || '已完成') : '今日尚未执行';
-                    const cookieState = state.cookieError ? `❌ ${state.cookieError}` : '✅ 正常';
-                    msgs.push(`🌐 ${label} (${maskEmail(acc.email || acc.username, pref.showEmail)})\n├ 📅 签到: ${last}\n└ 🍪 Cookie: ${cookieState}`);
+                    msgs.push(`🌐 ${label} (${maskEmail(displayAccountName(acc), pref.showEmail)})\n└ ℹ️ 仅保留账号数据，不参与纯 Worker 签到`);
                 }
                 continue;
             }
@@ -1175,28 +1019,8 @@ async function handleScheduled(env) {
         if (isTrigger) {
             const resultRows = [];
             for (const acc of accounts) {
-                if (isForumAccount(acc)) {
-                    const prefix = isNodeLocAccount(acc) ? 'NL' : 'NS';
-                    const label = isNodeLocAccount(acc) ? 'NodeLoc' : 'NodeSeek';
-                    const result = await runForumCheckin(acc);
-                    const state = await nlGetState(userId, env, prefix);
-                    if (result.ok) {
-                        state.cookieError = '';
-                        state.failCount = 0;
-                        state.failAlerted = false;
-                        state.lastCheckinDate = nodelocToday();
-                        state.lastCheckinMessage = result.message;
-                    } else {
-                        state.cookieError = result.cookieError || '';
-                        state.failCount = (state.failCount || 0) + 1;
-                        state._lastError = result.message;
-                    }
-                    await nlSaveState(userId, state, env, prefix);
-                    await checkAndAlert(userId, state, prefix, env);
-                    resultRows.push(formatForumResult(label, acc, result, pref));
-                    await new Promise(function(resolve) { setTimeout(resolve, 600); });
-                    continue;
-                }
+                // NodeLoc / NodeSeek 依赖真实浏览器/TLS 指纹，纯 Worker 定时任务直接跳过。
+                if (isForumAccount(acc)) continue;
                 const response = await gladosFetchJson(acc, '/api/user/checkin', { method: 'POST', body: JSON.stringify({ token: GLADOS_DOMAIN }) });
                 const result = response.data;
                 acc.domain = GLADOS_DOMAIN;
@@ -1449,8 +1273,6 @@ async function showSiteListMenu(chatId, messageId, userId, env) {
     const allSites = [...DEFAULT_SITES, ...customSites];
     let kb = [];
     allSites.forEach((site, index) => kb.push([{ text: `🌐 ${site}`, callback_data: `selsite_${index}` }]));
-    kb.push([{ text: "🌐 NodeLoc 自动签到", callback_data: "add_nodeloc" }]);
-    kb.push([{ text: "🔹 NodeSeek 自动签到", callback_data: "add_nodeseek" }]);
     kb.push([{ text: "🔧 自定义网站管理", callback_data: "site_mgr" }]);
     kb.push([{ text: "🔙 返回上级", callback_data: "account_mgr_menu" }]);
     await tgEdit(chatId, messageId, "🌐 <b>选择要添加账号的站点</b>\n\n点击下方站点按钮，或者进入自定义管理：", { inline_keyboard: kb }, env);
