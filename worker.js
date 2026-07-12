@@ -3,9 +3,9 @@
 const VIP_MAP = { 0: "Free", 10: "Free", 11: "Edu", 21: "Basic", 31: "Pro", 41: "Team", 51: "Enterprise" };
 const LIMIT_MAP = { 0: 10, 10: 10, 11: 100, 21: 200, 31: 500, 41: 2000, 51: 5000 };
 
-// GLaDOS 的几个旧域名共用同一套账号系统。对用户只保留一个入口；请求失败时再按旧域名回退。
-const GLADOS_DOMAIN = 'glados.network';
-const GLADOS_DOMAINS = [GLADOS_DOMAIN, 'glados.cloud', 'railgun.info', 'glados.rocks', 'glados.vip', 'glados.one', 'glados.space'];
+// GLaDOS 域名共用同一套账号系统。对用户只显示 glados；请求优先使用 facility，失败时自动回退。
+const GLADOS_DOMAIN = 'glados-facility.com';
+const GLADOS_DOMAINS = [GLADOS_DOMAIN, 'glados.vip', 'glados.cloud', 'glados.network', 'railgun.info', 'glados.rocks', 'glados.one', 'glados.space'];
 const DEFAULT_SITES = [GLADOS_DOMAIN];
 
 const HEADERS = {
@@ -30,6 +30,28 @@ function getCookieValue(cookie, name) {
     // 注意正则中必须是字面量分号+空白，不能用转义造成的 \\s（那会匹配反斜杠）。
     const match = String(cookie || '').match(new RegExp('(?:^|;\\s*)' + name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '=([^;]*)'));
     return match ? match[1] : '';
+}
+
+// Telegram 一条消息可以用空行、普通换行或重复 Cookie: 前缀分隔多组 Cookie。
+// 每组必须同时包含 koa:sess 和 koa:sess.sig，绝不把下一组混进前一组。
+function extractGladosCookies(text) {
+    const rows = String(text || '').replace(/\r/g, '').split('\n');
+    const cookies = [];
+    let current = [];
+    const flush = function() {
+        const cookie = normalizeCookie(current.join('; '));
+        if (getCookieValue(cookie, 'koa:sess') && getCookieValue(cookie, 'koa:sess.sig')) cookies.push(cookie);
+        current = [];
+    };
+    for (const row of rows) {
+        const line = row.trim().replace(/^Cookie:\s*/i, '');
+        if (!line) { flush(); continue; }
+        // 一个新 koa:sess 表示新账号；即使用户没有留空行也可正确拆分。
+        if (/(?:^|;\s*)koa:sess=/.test(line) && current.some(function(part) { return /(?:^|;\s*)koa:sess=/.test(part); })) flush();
+        current.push(line);
+    }
+    flush();
+    return Array.from(new Set(cookies));
 }
 
 
@@ -503,32 +525,41 @@ async function processAddAccountInfo(chatId, userId, text, env) {
     const rp = function(t, k) { return tgEdit(chatId, parseInt(msgId), t, k || null, env); };
     if (!domain) return rp("❌ 会话过期，请重新选择站点。");
 
-    // GLaDOS 裸 Cookie：多个官方域名账户互通，统一写入 glados.network；自动查询邮箱并按邮箱覆盖旧 Cookie。
-    if (text.indexOf('=') > -1) {
-        const cookie = normalizeCookie(text);
-        let found = null;
-        for (const domainCandidate of GLADOS_DOMAINS) {
-            const data = await safeFetchJson(`https://${domainCandidate}/api/user/info`, { headers: { ...HEADERS, 'Cookie': cookie, 'Origin': `https://${domainCandidate}` } });
-            const email = data && data.code === 0 && data.data && data.data.userInfo && data.data.userInfo.email;
-            if (email) {
-                found = { email: email, sourceDomain: domainCandidate };
-                break;
+    // GLaDOS Cookie 支持单条和多条粘贴；按每组 koa:sess / koa:sess.sig 拆分并逐个验证。
+    const suppliedCookies = extractGladosCookies(text);
+    if (suppliedCookies.length > 0) {
+        let accounts = await getAccounts(userId, env);
+        let added = 0, updated = 0, failed = 0;
+        for (const cookie of suppliedCookies) {
+            let found = null;
+            for (const domainCandidate of GLADOS_DOMAINS) {
+                const data = await safeFetchJson(`https://${domainCandidate}/api/user/info`, { headers: { ...HEADERS, 'Cookie': cookie, 'Origin': `https://${domainCandidate}` } });
+                const email = data && data.code === 0 && data.data && data.data.userInfo && data.data.userInfo.email;
+                if (email) {
+                    found = { email: email, sourceDomain: domainCandidate };
+                    break;
+                }
             }
-        }
-        if (found) {
-            let accounts = await getAccounts(userId, env);
+            if (!found) { failed++; continue; }
             const emailKey = found.email.trim().toLowerCase();
             const existingIndex = accounts.findIndex(function(account) { return isGladosAccount(account) && String(account.email || '').trim().toLowerCase() === emailKey; });
             const account = { domain: GLADOS_DOMAIN, email: found.email, cookie: cookie };
-            const updated = existingIndex >= 0;
-            if (updated) accounts[existingIndex] = { ...accounts[existingIndex], ...account };
-            else accounts.push(account);
+            if (existingIndex >= 0) {
+                accounts[existingIndex] = { ...accounts[existingIndex], ...account };
+                updated++;
+            } else {
+                accounts.push(account);
+                added++;
+            }
+        }
+        if (added || updated) {
             await env.GLADOS_DB.put(`USER_${userId}`, JSON.stringify(accounts));
             await saveUserIdForCron(userId, env);
             const total = accounts.filter(isGladosAccount).length;
-            return rp(`✅ <b>GLaDOS ${updated ? 'Cookie 已更新' : '绑定成功'}！</b>\n\n👤 账号: <code>${found.email}</code>\n🌐 统一站点: <code>${GLADOS_DOMAIN}</code>\n📦 当前 GLaDOS 账号数: ${total} 个\n\n<i>Cookie 已从 ${found.sourceDomain} 验证；各 GLaDOS 域名共用同一账户。</i>`);
+            const failedText = failed ? `\n❌ 无法验证: ${failed} 个` : '';
+            return rp(`✅ <b>GLaDOS Cookie 导入完成！</b>\n\n➕ 新增: ${added} 个\n🔁 更新: ${updated} 个${failedText}\n📦 当前 GLaDOS 账号数: ${total} 个\n\n<i>已按域名优先级自动验证并保存为统一 GLaDOS 账户。</i>`);
         }
-        return rp("❌ 无法验证 GLaDOS Cookie，请确认已登录后重新抓取。\n\n也可以使用 <code>邮箱:cookie</code> 格式手动绑定。");
+        return rp("❌ 无法验证 GLaDOS Cookie，请确认已登录后重新抓取。");
     }
 
     const lines = text.split('\n');
@@ -884,7 +915,7 @@ function formatAccountString(acc, index, total, pref, data, includeStatus = true
     let str = "";
     if (!isSingle) str += `〰️〰️〰️〰️〰️〰️〰️〰️〰️〰️〰️〰️\n[${index}/${total}] `;
     str += `📧 ${maskEmail(acc.email, pref.showEmail)}\n`;
-    str += ` ├ 🌐 站点: ${acc.domain.replace(/\./g, '.\u200b')}\n`;
+    str += ` ├ 🌐 站点: glados\n`;
     str += ` ├ 🍪 Cookie: ${data.cookieValid ? '✅ 有效' : '❌ 已失效'}\n`;
     if (includeStatus) str += ` ├ 📝 状态: ${data.statusMsg}\n`;
     str += ` ├ 📊 流量: ${data.trafficStr}\n`;
@@ -968,10 +999,10 @@ async function sendMainMenu(chatId, userId, env, messageId = null) {
 
 async function showSiteListMenu(chatId, messageId, userId, env) {
     const kb = [
-        [{ text: `🌐 ${GLADOS_DOMAIN}`, callback_data: 'selsite_0' }],
+        [{ text: "🌐 glados", callback_data: 'selsite_0' }],
         [{ text: "🔙 返回上级", callback_data: "account_mgr_menu" }]
     ];
-    await tgEdit(chatId, messageId, "🌐 <b>添加 GLaDOS 账号</b>\n\n点击下方按钮，然后发送完整 Cookie：", { inline_keyboard: kb }, env);
+    await tgEdit(chatId, messageId, "🌐 <b>添加 GLaDOS 账号</b>\n\n点击下方按钮，然后发送完整 Cookie（支持一次粘贴多组）：", { inline_keyboard: kb }, env);
 }
 
 async function showAccountList(chatId, messageId, userId, action, env) {
