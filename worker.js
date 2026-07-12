@@ -27,37 +27,20 @@ async function safeFetchTimeout(url, opts, ms = 12000) {
     } catch(e) { return null; }
 }
 
-// ================= NodeLoc 阅读/签到 + NodeSeek 签到 =================
+// ================= NodeLoc / NodeSeek 自动签到 =================
 const NL_BASE = 'https://www.nodeloc.com';
 // NodeSeek 主站是 nodeseek.com；不要把 Cookie 请求发到 www 子域名。
 const NS_BASE = 'https://nodeseek.com';
-const NL_UAS = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0'
-];
-const NL_TOPICS_PER_RUN = 5;     // 每次 cron 读 5 帖
-const NL_REST_CHANCE = 0.15;     // 读完一批后 15% 休息（原油猴 20-40 分钟）
-const NL_REST_MIN = 20;           // 最短休息 20 分钟
-const NL_REST_MAX = 40;           // 最长休息 40 分钟
-
-function nlSleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-function nlRand(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
-
-// 获取/初始化阅读状态
+// 获取/初始化站点签到状态
 async function nlGetState(userId, env, prefix = 'NL') {
     const raw = await env.GLADOS_DB.get(`${prefix}_STATE_${userId}`);
     if (raw) {
         try {
             const p = JSON.parse(raw);
-            if (p && typeof p === 'object' && !('queue' in p)) {
-                // 状态为空对象或结构残缺，用默认值填充
-                return { date: '', readsToday: 0, readTotal: 0, totalReadTime: 0, todayReadTime: 0, restUntil: 0, lastRead: 0, queue: [], cookieError: '', failCount: 0, failAlerted: false, ...p };
-            }
-            return p;
+            if (p && typeof p === 'object') return p;
         } catch(e) {}
     }
-    return { date: '', readsToday: 0, readTotal: 0, totalReadTime: 0, todayReadTime: 0, restUntil: 0, lastRead: 0, queue: [], cookieError: '', failCount: 0, failAlerted: false };
+    return { cookieError: '', failCount: 0, failAlerted: false };
 }
 
 async function nlSaveState(userId, state, env, prefix = 'NL') {
@@ -103,10 +86,34 @@ function decodeNodeseekJwt(cookie) {
 
 function nodeseekIdentity(cookie) {
     const decoded = decodeNodeseekJwt(cookie);
-    if (decoded && decoded.id) return 'NodeSeek #' + decoded.id + (decoded.name ? ' (' + decoded.name + ')' : '');
-    const session = getCookieValue(cookie, 'session');
-    if (session) return 'NodeSeek #' + session;
+    if (decoded && decoded.name) return String(decoded.name);
     return 'NodeSeek 账号';
+}
+
+function explainForumFailure(site, result) {
+    const raw = String(result?.message || '').trim();
+    const lower = raw.toLowerCase();
+    if (result?.cookieError || /cookie|not_logged_in|需要登录|未登录|过期|失效|unauthorized|forbidden/.test(lower)) {
+        return `Cookie 失效或未登录（${raw || '请重新复制完整 Cookie'}）`;
+    }
+    if (/bad csrf|csrf|无效的请求|invalid request/.test(lower)) {
+        return '请求校验失败（CSRF 或请求参数无效，请重新复制 Cookie 后重试）';
+    }
+    if (/<!doctype html|<html|just a moment|cloudflare/i.test(raw)) {
+        return `${site} 被 Cloudflare 拦截，请更新 cf_clearance 后重试`;
+    }
+    if (/timeout|超时/.test(lower)) return '请求超时，请稍后重试';
+    if (/already|已签|重复|今天已|今日已/.test(lower)) return '今日已签到';
+    return raw ? raw.slice(0, 180) : '站点返回未知响应';
+}
+
+function formatForumResult(site, account, result, pref) {
+    const icon = result.ok ? (result.already ? '🔁' : '✅') : '❌';
+    const status = result.ok ? (result.already ? '今日已签到' : '签到成功') : '签到失败';
+    const reason = explainForumFailure(site, result);
+    const reward = result.points ? ` | 本次 +${escapeHtml(result.points)}` : '';
+    const current = result.current ? ` | 当前 ${escapeHtml(result.current)}` : '';
+    return `${icon} <b>${site}</b> ${maskEmail(account.email || account.username || '?', pref.showEmail)}\n└ ${status}：${escapeHtml(reason)}${reward}${current}`;
 }
 
 function gladosRequestDomains(acc) {
@@ -236,146 +243,6 @@ async function runForumCheckin(acc) {
     return isNodeLocAccount(acc) ? runNodelocCheckin(acc.cookie) : runNodeseekCheckin(acc.cookie);
 }
 
-// 刷新话题队列
-async function nlRefreshQueue(baseUrl, cookie, state) {
-    const ua = NL_UAS[nlRand(0,NL_UAS.length-1)];
-    const hdrs = { 'User-Agent': ua, 'Cookie': cookie, 'Accept': 'application/json' };
-    
-    // 1. Try /unread.json — topics with unread posts
-    let r = await safeFetchTimeout(baseUrl + '/unread.json', { headers: hdrs }, 10000);
-    if (r && r.ok) {
-        const body = await r.text();
-        if (body.includes('not_logged_in') || body.includes('您需要登录')) {
-            return { topics: [], source: 'cookieDead' };
-        }
-        let d;
-        try { d = JSON.parse(body); } catch (e) { return { topics: [], source: 'error' }; }
-        const topics = (d.topic_list?.topics || []).filter(t => !t.pinned && t.id);
-        if (topics.length > 0) return { topics: topics.map(t => ({ id: t.id, title: t.title || '话题#'+t.id })), source: 'unread' };
-    }
-    
-    // 2. Try /new.json — brand new topics
-    r = await safeFetchTimeout(baseUrl + '/new.json', { headers: hdrs }, 10000);
-    if (r && r.ok) {
-        const body = await r.text();
-        if (body.includes('not_logged_in') || body.includes('您需要登录')) {
-            return { topics: [], source: 'cookieDead' };
-        }
-        let d;
-        try { d = JSON.parse(body); } catch (e) { return { topics: [], source: 'error' }; }
-        const topics = (d.topic_list?.topics || []).filter(t => !t.pinned && t.id);
-        if (topics.length > 0) return { topics: topics.map(t => ({ id: t.id, title: t.title || '话题#'+t.id })), source: 'new' };
-    }
-    
-    // 3. If both empty, check if all latest topics have been read
-    if (state?.readTopicIds?.length > 0) {
-        r = await safeFetchTimeout(baseUrl + '/latest.json?no_definitions=true', { headers: hdrs }, 10000);
-        if (r && r.ok) {
-            const d = await r.json().catch(() => ({}));
-            const allLatest = (d.topic_list?.topics || []).filter(t => !t.pinned && t.id);
-            if (allLatest.length > 0 && allLatest.every(t => state.readTopicIds.includes(t.id))) {
-                return { topics: [], source: 'allRead' };
-            }
-        }
-    }
-    
-    return { topics: [], source: 'empty' };
-}
-
-// 模拟阅读一帖（静默，不抛消息）
-async function nlReadTopic(baseUrl, cookie, topic, fast = false) {
-    await nlSleep(fast ? nlRand(500, 1500) : nlRand(5000, 15000));
-    const ua = NL_UAS[nlRand(0, NL_UAS.length-1)];
-    const hdrs = {
-        'User-Agent': ua,
-        'Cookie': cookie,
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-        'Referer': baseUrl + '/',
-        'Cache-Control': 'no-cache',
-        'Pragma': 'no-cache'
-    };
-    // 页面 fetch best-effort，失败不阻断（从 cookie _t 拿 CSRF 兜底）
-    const resp = await safeFetchTimeout(baseUrl + '/t/' + topic.id, { headers: hdrs }, 15000);
-    let csrf = '';
-    if (resp && resp.ok) {
-        const html = await Promise.race([resp.text(), new Promise(function(r){setTimeout(function(){r('')},20000)})]);
-        csrf = (html.match(/csrf-token" content="([^"]+)"/) || [])[1];
-        if (!csrf) {
-            const csrfResp = await safeFetchTimeout(baseUrl + '/session/csrf', {
-                headers: { 'User-Agent': ua, 'Cookie': cookie, 'Accept': 'application/json' }
-            }, 8000);
-            if (csrfResp && csrfResp.ok) {
-                try { const d = await csrfResp.json(); csrf = d.csrf || ''; } catch(e) {}
-            }
-        }
-    }
-    // 如果页面没拿到 CSRF，从 cookie 提取 _t
-    if (!csrf) {
-        csrf = decodeURIComponent((cookie.match(/_t=([^;]+)/) || [,''])[1]);
-    }
-    const readTime = fast ? nlRand(2000, 5000) : nlRand(60000, 120000);
-    await nlSleep(fast ? nlRand(500, 1500) : readTime);
-
-    let timingOk = false;
-    if (csrf) {
-        try {
-            const timingResp = await fetch(baseUrl + '/t/' + topic.id + '/timings', {
-                method: 'POST',
-                headers: {
-                    'User-Agent': ua,
-                    'Cookie': cookie,
-                    'Content-Type': 'application/json',
-                    'X-CSRF-Token': csrf,
-                    'Accept': 'application/json, text/javascript, */*; q=0.01',
-                    'X-Requested-With': 'XMLHttpRequest',
-                    'Referer': baseUrl + '/t/' + topic.id,
-                    'Origin': baseUrl
-                },
-                body: JSON.stringify({ timings: [{ msecs: readTime }], topic_time: readTime })
-            });
-            timingOk = timingResp.ok;
-        } catch(e) {}
-    }
-    await fetch(baseUrl + '/', { headers: { ...hdrs, 'Referer': baseUrl + '/t/' + topic.id } });
-    return { ok: true, cookieError: '', readTime, timingOk };
-}
-
-// 获取今日 NodeLoc 统计
-async function nlGetDailyStats(userId, env) {
-    try {
-        const state = await nlGetState(userId, env);
-        const today = new Date().toISOString().slice(0,10);
-        const isToday = state.date === today;
-        return {
-            readsToday: isToday ? state.readsToday : 0,
-            readTotal: state.readTotal || 0,
-            totalReadTime: Math.round((state.totalReadTime || 0) / 60000), // ms→分钟
-            restUntil: (state.restUntil || 0) > Date.now() ? state.restUntil : 0,
-            cookieError: state.cookieError || ''
-        };
-    } catch(e) {
-        return { readsToday: 0, readTotal: 0, totalReadTime: 0, restUntil: 0, cookieError: '' };
-    }
-}
-
-// 获取今日 NodeSeek 统计（复用 Discourse 阅读模块，只是不同 state key）
-async function nsGetDailyStats(userId, env) {
-    try {
-        const state = JSON.parse(await env.GLADOS_DB.get('NS_STATE_' + userId) || '{}');
-        const today = new Date().toISOString().slice(0,10);
-        const isToday = state.date === today;
-        return {
-            readsToday: isToday ? state.readsToday : 0,
-            readTotal: state.readTotal || 0,
-            totalReadTime: Math.round((state.totalReadTime || 0) / 60000),
-            restUntil: (state.restUntil || 0) > Date.now() ? state.restUntil : 0,
-            cookieError: state.cookieError || ''
-        };
-    } catch(e) {
-        return { readsToday: 0, readTotal: 0, totalReadTime: 0, restUntil: 0, cookieError: '' };
-    }
-}
 
 // ====== 健康状态系统 ======
 const SITE_NAMES = { NL: 'NodeLoc', NS: 'NodeSeek' };
@@ -396,7 +263,7 @@ async function getHealthSummary(userId, env) {
     } else {
         lines.push('⚪ GLaDOS 未绑定账号');
     }
-    // Discourse 阅读站
+    // NodeLoc / NodeSeek 签到站点
     const sites = [
         { domain: 'nodeloc.com', pfx: 'NL', name: 'NodeLoc' },
         { domain: 'nodeseek.com', pfx: 'NS', name: 'NodeSeek' },
@@ -434,145 +301,7 @@ async function checkAndAlert(userId, state, prefix, env) {
             })
         }).catch(function(){});
     }
-    if (state.allRead && !state.allReadNotified) {
-        state.allReadNotified = true;
-        const name = SITE_NAMES[prefix] || prefix;
-        fetch('https://api.telegram.org/bot' + env.BOT_TOKEN + '/sendMessage', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                chat_id: env.ADMIN_ID,
-                text: '🏁 <b>' + name + ' 全部话题已阅读完毕</b>\n暂无新话题，Bot 继续待命。',
-                parse_mode: 'HTML'
-            })
-        }).catch(function(){});
-    }
 }
-
-// 主入口：每次 cron 触发，静默读多帖
-async function runNodelocBatch(userId, cookie, env, baseUrl = NL_BASE, fast = false, statePrefix = 'NL') {
-    if (!cookie) return;
-    try {
-        const state = await nlGetState(userId, env, statePrefix);
-        const now = Date.now();
-        const today = new Date().toISOString().slice(0,10);
-
-        // 容错：状态为空对象时补默认值
-        if (!state.queue) state.queue = [];
-        if (!state.readsToday) state.readsToday = 0;
-        if (!state.readTotal) state.readTotal = 0;
-        if (!state.totalReadTime) state.totalReadTime = 0;
-        if (!state.todayReadTime) state.todayReadTime = 0;
-        if (!state.restUntil) state.restUntil = 0;
-        if (!state.failCount) state.failCount = 0;
-        if (!state.failAlerted) state.failAlerted = false;
-
-        if (state.date !== today) {
-            state.date = today;
-            state.readsToday = 0;
-            state.todayReadTime = 0;
-        }
-
-        // 休息期
-        if (state.restUntil > now) return;
-
-        // 按批次读
-        let readCount = 0;
-        for (let batch = 0; batch < NL_TOPICS_PER_RUN; batch++) {
-            // 检查休息（每帖之间也要检查）
-            if (state.restUntil > now) break;
-
-            // 确保队列有话题
-            if (state.queue.length === 0) {
-                const res = await nlRefreshQueue(baseUrl, cookie, state);
-                if (res.source === 'allRead') {
-                    state._lastError = '全站话题已读完';
-                    state.allRead = true;
-                    break;
-                }
-                if (res.source === 'cookieDead') {
-                    state._lastError = 'Cookie 已过期，请重新绑定';
-                    state.cookieError = '未登录';
-                    state.failCount = (state.failCount || 0) + 1;
-                    break;
-                }
-                if (res.source === 'empty') {
-                    state._lastError = '暂无可读话题';
-                    state.cookieError = '';
-                    break;
-                }
-                if (res.source === 'error') {
-                    state._lastError = '话题接口返回非 JSON';
-                    state.failCount = (state.failCount || 0) + 1;
-                    break;
-                }
-                if (res.topics.length === 0) {
-                    state._lastError = '刷新队列返回空';
-                    state.failCount = (state.failCount || 0) + 1;
-                    break;
-                }
-                // shuffle
-                for (let i = res.topics.length - 1; i > 0; i--) {
-                    const j = Math.floor(Math.random() * (i + 1));
-                    [res.topics[i], res.topics[j]] = [res.topics[j], res.topics[i]];
-                }
-                state.queue = res.topics;
-            }
-
-            const topic = state.queue.shift();
-            const result = await nlReadTopic(baseUrl, cookie, topic, fast);
-            if (!result.ok) {
-                if (result.cookieError) {
-                    state.cookieError = result.cookieError;
-                    state._lastError = 'Cookie 过期';
-                } else {
-                    state._lastError = '话题 #' + topic.id + ' 阅读失败';
-                    state.failCount = (state.failCount || 0) + 1;
-                }
-                // 非致命错误（单纯话题失效）跳过继续，不中断整批
-                if (!result.cookieError) continue;
-                break;
-            }
-            if (result.timingOk) {
-                state.readsToday = (state.readsToday || 0) + 1;
-                state.readTotal = (state.readTotal || 0) + 1;
-                state.totalReadTime = (state.totalReadTime || 0) + result.readTime;
-                state.todayReadTime = (state.todayReadTime || 0) + result.readTime;
-                if (!state.readTopicIds) state.readTopicIds = [];
-                if (topic && topic.id && !state.readTopicIds.includes(topic.id)) {
-                    state.readTopicIds.push(topic.id);
-                }
-            }
-            state.lastRead = now;
-            state.cookieError = '';
-            state.failCount = 0;
-            state.failAlerted = false;
-            delete state._lastError;
-            if (result.timingOk) readCount++;
-
-            // 每帖后 12% 概率休息
-            if (Math.random() < NL_REST_CHANCE) {
-                state.restUntil = now + nlRand(NL_REST_MIN, NL_REST_MAX) * 60000;
-                break;
-            }
-        }
-
-        // 告警检查
-        await checkAndAlert(userId, state, statePrefix, env);
-
-        // 只要有状态变更（读了帖 / 跳过了坏帖 / 遇到错误）就保存
-        if (readCount > 0 || state._lastError) {
-            await nlSaveState(userId, state, env, statePrefix);
-        }
-    } catch(e) {
-        // 静默失败，不影响签到
-    }
-}
-// ================= End NodeLoc Module =================
-
-
-
-
-
 
 
 
@@ -899,8 +628,6 @@ async function handleCallback(callbackQuery, env, origin) {
         if (acc.domain === 'nodeloc.com') {
             const pref = await getPref(userId, env);
             const st = await env.GLADOS_DB.get('NL_STATE_' + userId, 'json') || {};
-            const today = new Date().toISOString().slice(0,10);
-            const isToday = st.date === today;
             let msg = `🌐 <b>NodeLoc 自动签到</b>\n\n`;
             msg += `👤 账号: ${maskEmail(acc.email || acc.username || '?', pref.showEmail)}\n`;
             msg += `━━━━━━━━━━━━━━━━\n`;
@@ -911,21 +638,13 @@ async function handleCallback(callbackQuery, env, origin) {
             } else {
                 msg += `✅ Cookie 状态: 正常\n`;
             }
-            if ((parseInt(st.restUntil) || 0) > Date.now()) {
-                const mins = Math.ceil((parseInt(st.restUntil) - Date.now()) / 60000);
-                msg += `💤 休息中（剩余 ${mins} 分钟）\n`;
-            } else {
-                msg += `⏳ 状态: 等待下次定时运行\n`;
-            }
             return rp(msg);
         }
         if (acc.domain === 'nodeseek.com') {
             const pref = await getPref(userId, env);
             const st = await env.GLADOS_DB.get('NS_STATE_' + userId, 'json') || {};
-            const today = new Date().toISOString().slice(0,10);
-            const isToday = st.date === today;
             let msg = `🔹 <b>NodeSeek 自动签到</b>\n\n`;
-            msg += `👤 账号: ${acc.username || '?'}\n`;
+            msg += `👤 账号: ${escapeHtml(acc.username || '?')}\n`;
             msg += `━━━━━━━━━━━━━━━━\n`;
             msg += `📅 今日签到: ${st.lastCheckinDate === nodelocToday() ? (st.lastCheckinMessage || '已完成') : '尚未执行'}\n`;
             msg += `━━━━━━━━━━━━━━━━\n`;
@@ -933,12 +652,6 @@ async function handleCallback(callbackQuery, env, origin) {
                 msg += `⚠️ Cookie 异常: ${st.cookieError}\n`;
             } else {
                 msg += `✅ Cookie 状态: 正常\n`;
-            }
-            if ((parseInt(st.restUntil) || 0) > Date.now()) {
-                const mins = Math.ceil((parseInt(st.restUntil) - Date.now()) / 60000);
-                msg += `💤 休息中（剩余 ${mins} 分钟）\n`;
-            } else {
-                msg += `⏳ 状态: 等待下次定时运行\n`;
             }
             return rp(msg);
         }
@@ -953,6 +666,7 @@ async function handleCallback(callbackQuery, env, origin) {
         const index = parseInt(data.split('_')[2]);
         const accounts = await getAccounts(userId, env);
         const acc = accounts[index];
+        const pref = await getPref(userId, env);
         if (!acc) return rp("❌ 账号不存在");
         
         if (isForumAccount(acc)) {
@@ -973,12 +687,9 @@ async function handleCallback(callbackQuery, env, origin) {
             }
             await nlSaveState(userId, state, env, prefix);
             await checkAndAlert(userId, state, prefix, env);
-            const reward = result.points ? `\n🎁 本次: +${result.points}` : '';
-            const balance = result.current ? `\n🍗 当前: ${result.current}` : '';
-            return rp(`${result.ok ? (result.already ? '🔁 今日已签到' : '✅ 签到成功') : '❌ 签到失败'}\n🌐 ${isNodeLocAccount(acc) ? 'NodeLoc' : 'NodeSeek'}\n📝 ${escapeHtml(result.message || '未知响应')}${reward}${balance}`);
+            return rp(formatForumResult(isNodeLocAccount(acc) ? 'NodeLoc' : 'NodeSeek', acc, result, pref));
         }
         await rp("⏳ 正在为您单独执行签到，请稍候...");
-        const pref = await getPref(userId, env);
         const accData = await getAccountDataObj(acc, true); // true 代表触发签到
         const msgStr = formatAccountString(acc, index + 1, accounts.length, pref, accData, true, true);
         await rp(msgStr);
@@ -1329,7 +1040,7 @@ async function processCronTime(chatId, userId, text, env) {
 
 // ================= 核心：链式引擎驱动 =================
 async function executeTask(task, env, origin) {
-    const { type, chatId, userId, startIndex, plan, successList = [] } = task;
+    const { type, chatId, userId, startIndex, plan, successList = [], resultList = [] } = task;
     const accounts = await getAccounts(userId, env);
     const pref = await getPref(userId, env);
     
@@ -1338,6 +1049,7 @@ async function executeTask(task, env, origin) {
     
     let msgs = [];
     let newSuccessList = [...successList];
+    let newResultList = [...resultList];
 
     for (let i = startIndex; i < endIndex; i++) {
         const acc = accounts[i];
@@ -1362,9 +1074,9 @@ async function executeTask(task, env, origin) {
                     await nlSaveState(userId, state, env, prefix);
                     await checkAndAlert(userId, state, prefix, env);
                     const label = isNodeLocAccount(acc) ? 'NodeLoc' : 'NodeSeek';
-                    const reward = result.points ? ` | 本次:+${result.points}` : '';
-                    const current = result.current ? ` | 剩余鸡腿:${result.current}` : '';
-                    msgs.push(`🌐 ${label} (${maskEmail(acc.email || acc.username, pref.showEmail)})\n└ ${result.ok ? (result.already ? '🔁 今日已签到' : '✅ 签到成功') : '❌ 签到失败'}：${result.message || '未知响应'}${reward}${current}`);
+                    const forumMsg = formatForumResult(label, acc, result, pref);
+                    msgs.push(forumMsg);
+                    if (type === 'checkin') newResultList.push(forumMsg);
                 } else {
                     const state = await nlGetState(userId, env, prefix);
                     const label = isNodeLocAccount(acc) ? 'NodeLoc' : 'NodeSeek';
@@ -1376,7 +1088,9 @@ async function executeTask(task, env, origin) {
             }
             const doCheckin = (type === 'checkin');
             const data = await getAccountDataObj(acc, doCheckin);
-            msgs.push(formatAccountString(acc, i + 1, accounts.length, pref, data, true, false));
+            const gladosMsg = formatAccountString(acc, i + 1, accounts.length, pref, data, true, false);
+            msgs.push(gladosMsg);
+            if (type === 'checkin') newResultList.push(gladosMsg);
         } 
         else if (type === 'batch_exchange') {
             if (acc.domain === 'nodeloc.com' || acc.domain === 'nodeseek.com') continue;
@@ -1410,18 +1124,19 @@ async function executeTask(task, env, origin) {
         await new Promise(r => setTimeout(r, 600));
     }
 
-    if ((type === 'checkin' || type === 'view_all' || type === 'sub_all') && msgs.length > 0 && chatId) {
+    if (type !== 'checkin' && (type === 'view_all' || type === 'sub_all') && msgs.length > 0 && chatId) {
         await tgSend(chatId, msgs.join("\n"), env);
     }
 
     if (endIndex < accounts.length) {
-        await executeTask({ type, chatId, userId, startIndex: endIndex, plan, successList: newSuccessList }, env, origin);
+        await executeTask({ type, chatId, userId, startIndex: endIndex, plan, successList: newSuccessList, resultList: newResultList }, env, origin);
     } else {
         if (chatId) {
             const doneKb = { inline_keyboard: [[{ text: "🔙 返回主菜单", callback_data: "menu_main" }]] };
-            if (type === 'checkin' || type === 'view_all') {
-                const actName = type === 'checkin' ? "签到" : "查询";
-                await tgSend(chatId, `✅ <b>全部 ${accounts.length} 个账号${actName}处理完毕！</b>`, env, doneKb);
+            if (type === 'checkin') {
+                await tgSendResultList(chatId, `✅ <b>全部 ${accounts.length} 个账号签到处理完毕！</b>`, newResultList, env, doneKb);
+            } else if (type === 'view_all') {
+                await tgSend(chatId, `✅ <b>全部 ${accounts.length} 个账号查询处理完毕！</b>`, env, doneKb);
             } else if (type === 'batch_exchange') {
                 if (newSuccessList.length > 0) {
                     for (let i = 0; i < newSuccessList.length; i += 8) {
@@ -1477,7 +1192,7 @@ async function handleScheduled(env) {
                     }
                     await nlSaveState(userId, state, env, prefix);
                     await checkAndAlert(userId, state, prefix, env);
-                    resultRows.push(`${result.ok ? '✅' : '❌'} ${label}: ${result.message || '未知响应'}`);
+                    resultRows.push(formatForumResult(label, acc, result, pref));
                     await new Promise(function(resolve) { setTimeout(resolve, 600); });
                     continue;
                 }
@@ -1485,8 +1200,8 @@ async function handleScheduled(env) {
                 const result = response.data;
                 acc.domain = GLADOS_DOMAIN;
                 acc.cronSuccess = gladosCheckinSucceeded(result);
-                acc.cronMsg = result ? (result.message || JSON.stringify(result).slice(0, 60)) : '超时/无响应';
-                resultRows.push(`${acc.cronSuccess ? '✅' : '❌'} GLaDOS ${maskEmail(acc.email || '?', pref.showEmail)}: ${acc.cronMsg}`);
+                acc.cronMsg = result ? escapeHtml(result.message || JSON.stringify(result).slice(0, 60)) : '超时/无响应';
+                resultRows.push(`${acc.cronSuccess ? '✅' : '❌'} <b>GLaDOS</b> ${maskEmail(acc.email || '?', pref.showEmail)}: ${acc.cronSuccess ? '签到成功' : '签到失败'}：${acc.cronMsg}`);
                 await new Promise(function(resolve) { setTimeout(resolve, 600); });
             }
             await env.GLADOS_DB.put('USER_' + userId, JSON.stringify(accounts));
@@ -1498,7 +1213,8 @@ async function handleScheduled(env) {
                     body: JSON.stringify({ chat_id: env.ADMIN_ID, text: '⚠️ <b>GLaDOS ' + gladosBad.length + ' 个账号签到失败</b>\n' + names, parse_mode: 'HTML' })
                 }).catch(function(){});
             }
-            await tgSend(userId, `⏰ <b>定时签到自动完成</b>\n${resultRows.join('\n')}\n\n${await getHealthSummary(userId, env)}`, env);
+            await tgSendResultList(userId, '⏰ <b>定时签到自动完成</b>', resultRows, env);
+            await tgSend(userId, await getHealthSummary(userId, env), env);
         }
     }
 }
@@ -1781,6 +1497,24 @@ async function showExchangePlans(chatId, messageId, index, acc, userId, env) {
 
     const accInfo = formatAccountString(acc, index + 1, 0, pref, data, false, true).replace(/〰️〰️〰️〰️〰️〰️〰️〰️〰️〰️〰️〰️\n?/g, "");
     await tgSend(chatId, `🔄 <b>单账户积分兑换</b>\n\n${accInfo}\n\n👉 <b>请选择你要兑换的套餐：</b>`, env, kb);
+}
+
+async function tgSendResultList(chatId, heading, items, env, keyboard = null) {
+    const chunks = [];
+    let current = heading;
+    for (const item of items) {
+        const next = current + '\n\n' + item;
+        if (next.length > 3500 && current !== heading) {
+            chunks.push(current);
+            current = item;
+        } else {
+            current = next;
+        }
+    }
+    if (current) chunks.push(current);
+    for (let i = 0; i < chunks.length; i++) {
+        await tgSend(chatId, chunks[i], env, i === chunks.length - 1 ? keyboard : null);
+    }
 }
 
 async function tgSend(chatId, text, env, keyboard = null) {

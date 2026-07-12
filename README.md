@@ -5,8 +5,9 @@ Telegram bot，自动签到 GLaDOS、NodeLoc 与 NodeSeek；支持多账号 Cook
 ## 能干吗
 
 - **GLaDOS 签到** — 多账号每天自动签到；所有 GLaDOS 域名统一为一个账户入口，自动回退可用域名。
-- **NodeLoc / NodeSeek 签到** — 与 GLaDOS 使用同一签到时间；支持立即单独签到。
-- **Cookie 自动识别** — NodeSeek 从 `pjwt` 自动读取用户 ID/昵称；GLaDOS 从 `koa:sess` 查询账户邮箱，并按邮箱更新去重。
+- **NodeLoc / NodeSeek 签到** — 与 GLaDOS 使用同一签到时间；支持逐账号手动签到和定时签到，并显示每个账号的详细结果原因。
+- **Cookie 自动识别** — NodeSeek 从 `pjwt` 自动读取用户名；GLaDOS 从 `koa:sess` 查询账户邮箱，并按邮箱更新去重。
+- **论坛浏览功能** — 已移除 NodeLoc / NodeSeek 的自动浏览帖子逻辑，只保留稳定的自动签到。
 - **健康监控** — 菜单显示各站状态；Cookie 失效自动标红，连续失败主动推送告警。
 - **Telegram 管理** — 绑定账号、看状态、手动签到，都在对话框完成。
 
@@ -39,11 +40,11 @@ Telegram bot，自动签到 GLaDOS、NodeLoc 与 NodeSeek；支持多账号 Cook
 
 ## 绑定账号
 
-在 Telegram 里跟 bot 聊：
+在 Telegram 里跟 bot 聊。手动批量签到和每天定时签到都会逐个账号发送结果，包括成功、今日已签到、Cookie 失效、Cloudflare 拦截、CSRF/请求参数错误、超时等原因；账号较多时会自动拆分成多条消息，避免 Telegram 长度限制。
 
 - **GLaDOS**：点「添加账号」→ 选择唯一的 `glados.network` → 直接发送完整 Cookie。Bot 会在多个互通域名中验证 Cookie、自动读取邮箱，并按邮箱更新已有账户。
 - **NodeLoc**：点「添加账号」→「NodeLoc 自动签到」→ 从 `https://www.nodeloc.com` 复制完整 Cookie（必须包含 `_forum_session`）。
-- **NodeSeek**：点「添加账号」→「NodeSeek 自动签到」→ 从 `https://nodeseek.com` 复制完整 Cookie（包含 `session` 与 `pjwt`）。Bot 自动从 `pjwt`（JWT）解析用户 ID/昵称，例如 `NodeSeek #30820 (weaponj)`。
+- **NodeSeek**：点「添加账号」→「NodeSeek 自动签到」→ 从 `https://nodeseek.com` 复制完整 Cookie（包含 `session` 与 `pjwt`）。Bot 自动从 `pjwt`（JWT）解析用户名，例如 `weaponj`。
 
 Cookie 不要删减；若站点启用 Cloudflare 验证，也应一并保留浏览器复制到的 `cf_clearance`。
 
