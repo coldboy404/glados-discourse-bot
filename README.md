@@ -24,7 +24,7 @@ Telegram bot，自动签到 GLaDOS、NodeLoc 与 NodeSeek；支持多账号 Cook
 
 [![Auto Deploy](https://github.com/coldboy404/glados-discourse-bot/actions/workflows/deploy.yml/badge.svg)](https://github.com/coldboy404/glados-discourse-bot/actions/workflows/deploy.yml)
 
-设好以下 Secret 后，每次推 `worker.js` 到 `main` 自动更新 CF 上的代码，不需要再手动重新部署：
+设好以下 Secret 后，每次推 `worker.js` 到 `main` 自动更新 CF 上的代码，并自动把 Telegram 配置同步到 Worker，不需要再去 Cloudflare 重填：
 
 > 仓库 Settings → Secrets and variables → Actions
 
@@ -33,8 +33,10 @@ Telegram bot，自动签到 GLaDOS、NodeLoc 与 NodeSeek；支持多账号 Cook
 | `CF_API_TOKEN` | Cloudflare Dashboard → 我的 API 令牌 → 创建令牌（Workers 编辑权限） |
 | `CF_ACCOUNT_ID` | Cloudflare Dashboard → 右侧边栏 → 账户 ID |
 | `KV_NS_ID` | 一键部署后，在 Worker 的设置 → KV 里能看到 `GLADOS_DB` 的 Namespace ID |
+| `BOT_TOKEN` | Telegram BotFather 创建机器人后得到的 Token |
+| `ADMIN_ID` | 你的 Telegram 用户 ID |
 
-没设的人 fork 了也能正常用一键按钮部署，这条自动跳过，不影响。
+未配置完整 Secret 时，GitHub Actions 会主动终止部署并提示缺少变量；首次使用请一次性配置上表全部 5 项。
 
 ## 绑定账号
 
