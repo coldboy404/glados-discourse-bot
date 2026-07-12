@@ -79,8 +79,33 @@ function normalizeCookie(raw) {
 }
 
 function getCookieValue(cookie, name) {
-    const match = String(cookie || '').match(new RegExp('(?:^|;\\s*)' + name.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&') + '=([^;]*)'));
+    // 注意正则中必须是字面量分号+空白，不能用转义造成的 \\s（那会匹配反斜杠）。
+    const match = String(cookie || '').match(new RegExp('(?:^|;\\s*)' + name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '=([^;]*)'));
     return match ? match[1] : '';
+}
+
+// NodeSeek 的 Cookie 是 session=<id> + pjwt=<JWT>，不是 koa:sess。
+// pjwt 是标准 base64url JWT，payload 里包含 id / name。
+function decodeNodeseekJwt(cookie) {
+    const pjwt = getCookieValue(cookie, 'pjwt');
+    if (!pjwt) return null;
+    try {
+        const parts = pjwt.split('.');
+        // NodeSeek 的 pjwt 为 payload.signature（无 header 段），而标准 JWT 为 header.payload.signature。
+        const payloadSeg = parts.length === 2 ? parts[0] : parts[1];
+        let payload = payloadSeg.replace(/-/g, '+').replace(/_/g, '/');
+        while (payload.length % 4) payload += '=';
+        const json = JSON.parse(atob(payload));
+        return { id: json.id, name: json.name };
+    } catch (e) { return null; }
+}
+
+function nodeseekIdentity(cookie) {
+    const decoded = decodeNodeseekJwt(cookie);
+    if (decoded && decoded.id) return 'NodeSeek #' + decoded.id + (decoded.name ? ' (' + decoded.name + ')' : '');
+    const session = getCookieValue(cookie, 'session');
+    if (session) return 'NodeSeek #' + session;
+    return 'NodeSeek 账号';
 }
 
 function gladosRequestDomains(acc) {
@@ -118,13 +143,13 @@ async function runNodelocCheckin(cookie) {
         headers: { 'User-Agent': HEADERS['User-Agent'], 'Cookie': cleanCookie, 'Accept': 'application/json', 'Referer': NL_BASE + '/' }
     }, 10000);
     if (!csrfResponse) return { ok: false, message: '获取 CSRF 超时' };
-    if (csrfResponse.status === 401 || csrfResponse.status === 403) return { ok: false, cookieError: '未登录', message: 'Cookie 已失效' };
+    if (csrfResponse.status === 401) return { ok: false, cookieError: '未登录', message: 'Cookie 已失效' };
     const csrfData = await csrfResponse.json().catch(function() { return {}; });
     const csrf = csrfData.csrf || '';
     if (!csrf) return { ok: false, message: '未取得 CSRF Token' };
 
     const nonce = nodelocNonce();
-    const response = await safeFetchTimeout(NL_BASE + '/checkin', {
+    const response = await safeFetchTimeout(NL_BASE + '/checkin.json', {
         method: 'POST',
         headers: {
             'User-Agent': HEADERS['User-Agent'],
@@ -141,17 +166,22 @@ async function runNodelocCheckin(cookie) {
         body: new URLSearchParams({ nonce: nonce, timestamp: String(Date.now()) }).toString()
     }, 12000);
     if (!response) return { ok: false, message: '签到请求超时' };
-    if (response.status === 401 || response.status === 403) return { ok: false, cookieError: '未登录', message: 'Cookie 已失效' };
     const raw = await response.text();
     const data = (() => { try { return JSON.parse(raw); } catch(e) { return {}; } })();
     const message = data.message || data.msg || raw.slice(0, 100) || ('HTTP ' + response.status);
-    const already = /already|已签|重复|today/i.test(message);
-    return { ok: response.ok && (data.success !== false || already), already, points: data.points || data.gain || '', message, cookieError: '' };
+    // 403 在 NodeLoc 签到插件中表示当日已签到（而非未登录）；仅 401 视为 Cookie 失效。
+    const already = response.status === 403 || /already|已签|重复|today/i.test(message);
+    const cookieError = response.status === 401 ? '未登录' : '';
+    const ok = response.status === 403 || (response.ok && data.success !== false) || already;
+    return { ok, already, points: data.points || data.gain || '', message, cookieError };
 }
 
 async function runNodeseekCheckin(cookie) {
     const cleanCookie = normalizeCookie(cookie);
-    if (!cleanCookie || !/(?:koa:sess|session|token)=/i.test(cleanCookie)) return { ok: false, cookieError: 'Cookie 格式不完整', message: '请复制完整 NodeSeek Cookie' };
+    // NodeSeek 真实 Cookie 形如 session=<id>; pjwt=<JWT>，不是 koa:sess。
+    if (!getCookieValue(cleanCookie, 'session') && !getCookieValue(cleanCookie, 'pjwt')) {
+        return { ok: false, cookieError: 'Cookie 格式不完整', message: '请复制完整 NodeSeek Cookie（需含 session / pjwt）' };
+    }
     const response = await safeFetchTimeout(NS_BASE + '/api/attendance?random=true', {
         method: 'POST',
         headers: {
@@ -920,93 +950,6 @@ async function handleCallback(callbackQuery, env, origin) {
             const balance = result.current ? `\n🍗 当前: ${result.current}` : '';
             return rp(`${result.ok ? (result.already ? '🔁 今日已签到' : '✅ 签到成功') : '❌ 签到失败'}\n🌐 ${isNodeLocAccount(acc) ? 'NodeLoc' : 'NodeSeek'}\n📝 ${result.message || '未知响应'}${reward}${balance}`);
         }
-        if (acc.domain === 'nodeloc.com') {
-            var mid = callbackQuery.message.message_id;
-            var mt = function(s) { fetch('https://api.telegram.org/bot'+env.BOT_TOKEN+'/editMessageText',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_id:chatId,message_id:mid,text:s,parse_mode:'HTML'})}); };
-            mt('📖 NL 手动阅读\n───────');
-            try {
-                var r1 = await Promise.race([fetch('https://www.nodeloc.com/latest.json?no_definitions=true',{headers:{'User-Agent':HEADERS['User-Agent'],'Cookie':acc.cookie,'Accept':'application/json'}}),new Promise(function(r){setTimeout(r,15000)})]);
-                if(!r1){ mt('❌ 话题列表超时'); return; }
-                if(!r1.ok){ mt('❌ 话题列表 '+r1.status); return; }
-                var d1 = await r1.json().catch(function(){return{}});
-                var allTopics = (d1.topic_list?.topics||[]).filter(function(t){return !t.pinned&&t.id});
-                mt('📥 列表: 共 '+allTopics.length+' 个话题，准备读 5 帖');
-                var ok=0,totalMs=0,skipped=0,tried=0;
-                var cookieCsrf=decodeURIComponent((acc.cookie.match(/_t=([^;]+)/)||[,''])[1]);
-                for(var i=0; i<allTopics.length && ok<5; i++){
-                    var t=allTopics[i]; tried++;
-                    try {
-                        var csrf=cookieCsrf;
-                        var stage='';
-                        if(!csrf){
-                            mt('⚠️ #'+t.id+' 无 CSRF，跳过'); skipped++; continue;
-                        }
-                        stage='🔑 CSRF(cookie)';
-                        var rMs=3000+Math.floor(Math.random()*4000);
-                        mt('⏳ #'+t.id+' 等待 '+Math.round(rMs/1000)+'s... ('+ok+'/5) | '+stage);
-                        await new Promise(function(r){setTimeout(r,rMs)});
-                        fetch('https://www.nodeloc.com/t/'+t.id+'/timings',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf,'Cookie':acc.cookie,'User-Agent':HEADERS['User-Agent']},body:JSON.stringify({timings:[{topic_id:t.id,msecs:rMs}]})}).catch(function(){});
-                        ok++;totalMs+=rMs;
-                        mt('✅ #'+t.id+' 完成 ('+ok+'/5) | ⏱ '+Math.round(rMs/1000)+'s | '+stage);
-                    } catch(e){ mt('❌ #'+t.id+' 异常: '+(e.message||e)); skipped++; }
-                }
-                var st=JSON.parse(await env.GLADOS_DB.get('NL_STATE_'+userId)||'{}');
-                var today=new Date().toISOString().slice(0,10);
-                if(st.date===today)st.readsToday=(st.readsToday||0)+ok;else{st.date=today;st.readsToday=ok;st.todayReadTime=0;}
-                st.readTotal=(st.readTotal||0)+ok;st.totalReadTime=(st.totalReadTime||0)+totalMs;st.todayReadTime=(st.todayReadTime||0)+totalMs;
-                st.failCount = ok > 0 ? 0 : (st.failCount||0) + 1;
-                if (ok > 0) st.failAlerted = false;
-                await env.GLADOS_DB.put('NL_STATE_'+userId,JSON.stringify(st));
-                await checkAndAlert(userId, st, 'NL', env);
-                await fetch('https://api.telegram.org/bot'+env.BOT_TOKEN+'/editMessageText',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_id:chatId,message_id:mid,text:'✅ NL 完成 '+ok+'/5 | 跳过 '+skipped+' | ⏱ '+Math.round(totalMs/1000)+'s | 📚 累计 '+st.readTotal+'帖(今'+st.readsToday+')',parse_mode:'HTML'})});
-            } catch(e) {
-                mt('❌ 致命: '+(e.message||e));
-            }
-            return;
-        }
-        if (acc.domain === 'nodeseek.com') {
-            var mid = callbackQuery.message.message_id;
-            var mt = function(s) { fetch('https://api.telegram.org/bot'+env.BOT_TOKEN+'/editMessageText',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_id:chatId,message_id:mid,text:s,parse_mode:'HTML'})}); };
-            mt('📖 NS 手动阅读\n───────');
-            try {
-                var r1 = await Promise.race([fetch('https://nodeseek.com/latest.json?no_definitions=true',{headers:{'User-Agent':HEADERS['User-Agent'],'Cookie':acc.cookie,'Accept':'application/json'}}),new Promise(function(r){setTimeout(r,15000)})]);
-                if(!r1){ mt('❌ 话题列表超时'); return; }
-                var d1 = await r1.json().catch(function(){return{}});
-                var allTopics = (d1.topic_list?.topics||[]).filter(function(t){return !t.pinned&&t.id});
-                mt('📥 列表: 共 '+allTopics.length+' 个话题，准备读 5 帖');
-                var ok=0,totalMs=0,skipped=0,tried=0;
-                var cookieCsrf=decodeURIComponent((acc.cookie.match(/_t=([^;]+)/)||[,''])[1]);
-                for(var i=0; i<allTopics.length && ok<5; i++){
-                    var t=allTopics[i]; tried++;
-                    try {
-                        var csrf=cookieCsrf;
-                        var stage='';
-                        if(!csrf){
-                            mt('⚠️ #'+t.id+' 无 CSRF，跳过'); skipped++; continue;
-                        }
-                        stage='🔑 CSRF(cookie)';
-                        var rMs=3000+Math.floor(Math.random()*4000);
-                        mt('⏳ #'+t.id+' 等待 '+Math.round(rMs/1000)+'s... ('+ok+'/5) | '+stage);
-                        await new Promise(function(r){setTimeout(r,rMs)});
-                        fetch('https://nodeseek.com/t/'+t.id+'/timings',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf,'Cookie':acc.cookie,'User-Agent':HEADERS['User-Agent']},body:JSON.stringify({timings:[{topic_id:t.id,msecs:rMs}]})}).catch(function(){});
-                        ok++;totalMs+=rMs;
-                        mt('✅ #'+t.id+' 完成 ('+ok+'/5) | ⏱ '+Math.round(rMs/1000)+'s | '+stage);
-                    } catch(e){ mt('❌ #'+t.id+' 异常: '+(e.message||e)); skipped++; }
-                }
-                var st=JSON.parse(await env.GLADOS_DB.get('NS_STATE_'+userId)||'{}');
-                var today=new Date().toISOString().slice(0,10);
-                if(st.date===today)st.readsToday=(st.readsToday||0)+ok;else{st.date=today;st.readsToday=ok;st.todayReadTime=0;}
-                st.readTotal=(st.readTotal||0)+ok;st.totalReadTime=(st.totalReadTime||0)+totalMs;st.todayReadTime=(st.todayReadTime||0)+totalMs;
-                st.failCount = ok > 0 ? 0 : (st.failCount||0) + 1;
-                if (ok > 0) st.failAlerted = false;
-                await env.GLADOS_DB.put('NS_STATE_'+userId,JSON.stringify(st));
-                await checkAndAlert(userId, st, 'NS', env);
-                await fetch('https://api.telegram.org/bot'+env.BOT_TOKEN+'/editMessageText',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_id:chatId,message_id:mid,text:'✅ 完成 '+ok+'/5 | 跳过 '+skipped+' | ⏱ '+Math.round(totalMs/1000)+'s | 📚 累计 '+st.readTotal+'帖(今'+st.readsToday+')',parse_mode:'HTML'})});
-            } catch(e) {
-                mt('❌ 致命: '+(e.message||e));
-            }
-            return;
-        }
         await rp("⏳ 正在为您单独执行签到，请稍候...");
         const pref = await getPref(userId, env);
         const accData = await getAccountDataObj(acc, true); // true 代表触发签到
@@ -1097,12 +1040,13 @@ async function fetchDiscourseUser(cookie, baseUrl) {
     return null;
 }
 
-// 诊断 NodeSeek 连通性
+// 诊断 NodeSeek 连通性（NodeSeek 不是 Discourse，用真实签到接口验证）
 async function diagnoseNodeseek(userId, env) {
     const accounts = await getAccounts(userId, env);
     const nsAcc = accounts.find(a => a.domain === 'nodeseek.com');
     if (!nsAcc) return '没有 NodeSeek 账号';
     const rows = ['🔍 NodeSeek 诊断结果', '━━━━━━━━━━━'];
+    rows.push('👤 身份: ' + nodeseekIdentity(nsAcc.cookie));
     async function t(label, url, extra) {
         try {
             const r = await Promise.race([
@@ -1116,25 +1060,17 @@ async function diagnoseNodeseek(userId, env) {
             return null;
         }
     }
-    const r1 = await t('/latest.json', 'https://nodeseek.com/latest.json?no_definitions=true', {
-        headers: { 'User-Agent': HEADERS['User-Agent'], 'Cookie': nsAcc.cookie, 'Accept': 'application/json' }
-    });
-    if (r1) {
-        try { const d = await r1.json(); rows.push(`   topics=${d.topic_list?.topics?.length || 0}`); } catch(e) { rows.push(`   json parse ❌`); }
-    }
-    const r2 = await t('/t/5', 'https://nodeseek.com/t/5', {
+    const r1 = await t('GET /', 'https://nodeseek.com/', {
         headers: { 'User-Agent': HEADERS['User-Agent'], 'Cookie': nsAcc.cookie }
     });
-    if (r2) {
-        rows.push(`   logged_out=${r2.headers.get('x-discourse-logged-out')}`);
-        const h = await r2.text();
-        rows.push(`   csrf=${!!h.match(/csrf-token" content="([^"]+)"/)} len=${h.length}`);
-    }
-    const r3 = await t('/session/current.json', 'https://nodeseek.com/session/current.json', {
-        headers: { 'User-Agent': HEADERS['User-Agent'], 'Cookie': nsAcc.cookie, 'Accept': 'application/json' }
+    if (r1) rows.push(`   cloudflare=${r1.headers.get('server') === 'cloudflare' ? '是' : (r1.headers.get('cf-mitigated') ? '挑战' : '否')}`);
+    const r2 = await t('POST /api/attendance', NS_BASE + '/api/attendance?random=true', {
+        method: 'POST',
+        headers: { 'User-Agent': HEADERS['User-Agent'], 'Cookie': nsAcc.cookie, 'Accept': 'application/json, text/plain, */*', 'Origin': NS_BASE, 'Referer': NS_BASE + '/board', 'Content-Length': '0' }
     });
-    if (r3) {
-        try { const j = await r3.json(); rows.push(`   user=${j?.current_user?.username || 'null'}`); } catch(e) { rows.push(`   json parse ❌`); }
+    if (r2) {
+        const raw = await r2.text().catch(() => '');
+        rows.push(`   body=${(raw || '').slice(0, 120)}`);
     }
     return rows.join('\n');
 }
@@ -1174,19 +1110,16 @@ async function processAddAccountInfo(chatId, userId, text, env) {
         return;
     }
 
-    // NodeSeek 是独立站点，不是 Discourse：保留完整 Cookie；koa:sess 中有 userId 时将其作为账号标识。
+    // NodeSeek 是独立站点，不是 Discourse：Cookie 形如 session=<id>; pjwt=<JWT>。
     if (state === 'AWAITING_NODESEEK_COOKIE') {
         const cookie = normalizeCookie(text);
-        const session = getCookieValue(cookie, 'koa:sess');
-        if (!session) return rp("❌ Cookie 格式错误！需要包含 <code>koa:sess</code>，请在 https://nodeseek.com 复制完整 Cookie。");
-        let identity = '';
-        try {
-            const decoded = JSON.parse(atob(session.split('.')[0].replace(/-/g, '+').replace(/_/g, '/')));
-            if (decoded && decoded.userId) identity = 'NodeSeek #' + decoded.userId;
-        } catch(e) {}
-        if (!identity) identity = 'NodeSeek 账号';
+        if (!getCookieValue(cookie, 'session') && !getCookieValue(cookie, 'pjwt')) {
+            return rp("❌ Cookie 格式错误！需要包含 <code>session</code> / <code>pjwt</code>，请在 https://nodeseek.com 复制完整 Cookie。");
+        }
+        const identity = nodeseekIdentity(cookie);
         let accounts = await getAccounts(userId, env);
-        const exists = accounts.some(function(a) { return isNodeSeekAccount(a) && getCookieValue(a.cookie, 'koa:sess') === session; });
+        const sessionVal = getCookieValue(cookie, 'session');
+        const exists = accounts.some(function(a) { return isNodeSeekAccount(a) && getCookieValue(a.cookie, 'session') === sessionVal; });
         if (exists) return rp(`ℹ️ 该账号已绑定（<code>${identity}</code>），无需重复操作。`);
         accounts.push({ email: identity, username: identity, domain: NS_DOMAIN, cookie: cookie });
         await env.GLADOS_DB.put(`USER_${userId}`, JSON.stringify(accounts));
@@ -1199,7 +1132,8 @@ async function processAddAccountInfo(chatId, userId, text, env) {
     }
 
     // GLaDOS 裸 Cookie：多个官方域名账户互通，统一写入 glados.network；自动查询邮箱并按邮箱覆盖旧 Cookie。
-    if (text.indexOf('=') > -1 && !/expires=|connect\.sid|_forum_session|koa:sess/.test(text)) {
+    // 真实 GLaDOS Cookie 形如 koa:sess=...，不要把它误判成其它站点；同时排除 NodeLoc/NodeSeek 的标记。
+    if (text.indexOf('=') > -1 && !/expires=|connect\.sid|_forum_session|pjwt/.test(text)) {
         const cookie = normalizeCookie(text);
         let found = null;
         for (const domainCandidate of GLADOS_DOMAINS) {
@@ -1273,9 +1207,11 @@ async function clearDiscourseState(userId, domain, env) {
 
 async function processUpdateCookie(chatId, userId, text, env) {
     const indexStr = await env.GLADOS_DB.get(`TEMP_${userId}`);
+    const msgId = await env.GLADOS_DB.get(`MSGID_${userId}`);
     await env.GLADOS_DB.delete(`STATE_${userId}`);
     await env.GLADOS_DB.delete(`TEMP_${userId}`);
 
+    const rp = function(t, k) { return tgEdit(chatId, parseInt(msgId) || 0, t, k || null, env); };
     if (!indexStr) return rp("❌ 会话过期。");
     const index = parseInt(indexStr);
     const accounts = await getAccounts(userId, env);

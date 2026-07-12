@@ -42,7 +42,7 @@ Telegram bot，自动签到 GLaDOS、NodeLoc 与 NodeSeek；支持多账号 Cook
 
 - **GLaDOS**：点「添加账号」→ 选择唯一的 `glados.network` → 直接发送完整 Cookie。Bot 会在多个互通域名中验证 Cookie、自动读取邮箱，并按邮箱更新已有账户。
 - **NodeLoc**：点「添加账号」→「NodeLoc 自动签到」→ 从 `https://www.nodeloc.com` 复制完整 Cookie（必须包含 `_forum_session`）。
-- **NodeSeek**：点「添加账号」→「NodeSeek 自动签到」→ 从 `https://nodeseek.com` 复制完整 Cookie（必须包含 `koa:sess`）。Bot 自动解析其中的用户 ID，例如 `koa:sess=eyJ1c2VySWQiOj...` 会显示为 `NodeSeek #用户ID`。
+- **NodeSeek**：点「添加账号」→「NodeSeek 自动签到」→ 从 `https://nodeseek.com` 复制完整 Cookie（包含 `session` 与 `pjwt`）。Bot 自动从 `pjwt`（JWT）解析用户 ID/昵称，例如 `NodeSeek #30820 (weaponj)`。
 
 Cookie 不要删减；若站点启用 Cloudflare 验证，也应一并保留浏览器复制到的 `cf_clearance`。
 
