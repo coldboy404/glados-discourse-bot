@@ -17,7 +17,7 @@ Telegram bot，自动签到 GLaDOS、NodeLoc 与 NodeSeek；支持多账号 Cook
 
 [![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/coldboy404/glados-discourse-bot)
 
-部署后，使用带 `X-Bot-Token: <BOT_TOKEN>` 请求头访问 `https://xxx.workers.dev/setup` 激活 webhook；根路径只返回运行状态，不再自动调用 Telegram API。
+部署后，使用带 `X-Bot-Token: <BOT_TOKEN>` 请求头访问 `https://xxx.workers.dev/setup` 激活 webhook，并清空旧命令、只保留 `/start`；根路径只返回运行状态，不再自动调用 Telegram API。若 Telegram 客户端仍显示旧命令，重新打开机器人菜单或发送 `/start`。
 
 > ⚠️  按钮需要 `wrangler.toml` 的 `kv_namespaces` 里**不要写** `id` 字段（包括 `id = ""`），否则按钮页面报"无法获取存储库内容"。
 

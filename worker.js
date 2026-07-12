@@ -345,15 +345,17 @@ export default {
             }
             if (url.pathname === '/setup') {
                 const webhookUrl = `${url.protocol}//${url.hostname}/webhook`;
-                const commands = [{ command: "start", description: "启动/重置机器人菜单" }];
-                const [webhookRes, commandRes] = await Promise.all([
+                const commands = [{ command: "start", description: "启动机器人" }];
+                const [webhookRes, deleteCommandsRes, commandRes] = await Promise.all([
                     fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/setWebhook?url=${encodeURIComponent(webhookUrl)}`),
+                    fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/deleteMyCommands`, { method: 'POST' }),
                     fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/setMyCommands`, {
                         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ commands })
                     })
                 ]);
                 const result = {
                     webhook: (await webhookRes.json()).ok === true,
+                    commandsCleared: (await deleteCommandsRes.json()).ok === true,
                     commands: (await commandRes.json()).ok === true
                 };
                 return new Response(JSON.stringify(result), { headers: { 'Content-Type': 'application/json' } });
