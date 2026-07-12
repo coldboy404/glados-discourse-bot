@@ -31,6 +31,8 @@ async function safeFetchTimeout(url, opts, ms = 12000) {
 const NL_BASE = 'https://www.nodeloc.com';
 // NodeSeek 主站是 nodeseek.com；不要把 Cookie 请求发到 www 子域名。
 const NS_BASE = 'https://nodeseek.com';
+// NodeSeek 的签到 API 会从无 www 主域重定向到 www；API 请求使用最终 Host，避免 POST 301 变成 HTML。
+const NS_API_BASE = 'https://www.nodeseek.com';
 // 获取/初始化站点签到状态
 async function nlGetState(userId, env, prefix = 'NL') {
     const raw = await env.GLADOS_DB.get(`${prefix}_STATE_${userId}`);
@@ -107,13 +109,18 @@ function explainForumFailure(site, result) {
     return raw ? raw.slice(0, 180) : '站点返回未知响应';
 }
 
+function displayAccountName(account) {
+    if (isNodeSeekAccount(account)) return nodeseekIdentity(account.cookie) || 'NodeSeek 账号';
+    return account.email || account.username || '?';
+}
+
 function formatForumResult(site, account, result, pref) {
     const icon = result.ok ? (result.already ? '🔁' : '✅') : '❌';
     const status = result.ok ? (result.already ? '今日已签到' : '签到成功') : '签到失败';
     const reason = explainForumFailure(site, result);
     const reward = result.points ? ` | 本次 +${escapeHtml(result.points)}` : '';
     const current = result.current ? ` | 当前 ${escapeHtml(result.current)}` : '';
-    return `${icon} <b>${site}</b> ${maskEmail(account.email || account.username || '?', pref.showEmail)}\n└ ${status}：${escapeHtml(reason)}${reward}${current}`;
+    return `${icon} <b>${site}</b> ${maskEmail(displayAccountName(account), pref.showEmail)}\n└ ${status}：${escapeHtml(reason)}${reward}${current}`;
 }
 
 function gladosRequestDomains(acc) {
@@ -159,12 +166,6 @@ function nodelocToday() {
     return beijingNow.toISOString().slice(0, 10);
 }
 
-function nodelocNonce() {
-    const bytes = new Uint8Array(16);
-    crypto.getRandomValues(bytes);
-    return Array.from(bytes, function(byte) { return byte.toString(36); }).join('').slice(0, 26);
-}
-
 async function runNodelocCheckin(cookie) {
     const cleanCookie = normalizeCookie(cookie);
     if (!getCookieValue(cleanCookie, '_forum_session')) return { ok: false, cookieError: '缺少 _forum_session', message: 'Cookie 格式不完整' };
@@ -177,22 +178,19 @@ async function runNodelocCheckin(cookie) {
     const csrf = csrfData.csrf || '';
     if (!csrf) return { ok: false, message: '未取得 CSRF Token' };
 
-    const nonce = nodelocNonce();
     const response = await safeFetchTimeout(NL_BASE + '/checkin.json', {
         method: 'POST',
         headers: {
             'User-Agent': HEADERS['User-Agent'],
             'Cookie': cleanCookie,
-            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+            'Content-Type': 'application/json',
             'Accept': 'application/json, text/plain, */*',
             'Origin': NL_BASE,
             'Referer': NL_BASE + '/',
-            'X-Discourse-Checkin': 'true',
-            'X-Checkin-Nonce': nonce,
             'X-CSRF-Token': csrf,
             'X-Requested-With': 'XMLHttpRequest'
         },
-        body: new URLSearchParams({ nonce: nonce, timestamp: String(Date.now()) }).toString()
+        body: JSON.stringify({})
     }, 12000);
     if (!response) return { ok: false, message: '签到请求超时' };
     const raw = await response.text();
@@ -215,14 +213,14 @@ async function runNodeseekCheckin(cookie) {
     if (!getCookieValue(cleanCookie, 'session') || !getCookieValue(cleanCookie, 'pjwt')) {
         return { ok: false, cookieError: 'Cookie 格式不完整', message: '请复制完整 NodeSeek Cookie（需同时包含 session / pjwt）' };
     }
-    const response = await safeFetchTimeout(NS_BASE + '/api/attendance?random=true', {
+    const response = await safeFetchTimeout(NS_API_BASE + '/api/attendance?random=true', {
         method: 'POST',
         headers: {
             'User-Agent': HEADERS['User-Agent'],
             'Cookie': cleanCookie,
             'Accept': 'application/json, text/plain, */*',
-            'Origin': NS_BASE,
-            'Referer': NS_BASE + '/board',
+            'Origin': NS_API_BASE,
+            'Referer': NS_API_BASE + '/board',
             'Content-Length': '0'
         }
     }, 12000);
@@ -644,7 +642,7 @@ async function handleCallback(callbackQuery, env, origin) {
             const pref = await getPref(userId, env);
             const st = await env.GLADOS_DB.get('NS_STATE_' + userId, 'json') || {};
             let msg = `🔹 <b>NodeSeek 自动签到</b>\n\n`;
-            msg += `👤 账号: ${escapeHtml(acc.username || '?')}\n`;
+            msg += `👤 账号: ${escapeHtml(displayAccountName(acc))}\n`;
             msg += `━━━━━━━━━━━━━━━━\n`;
             msg += `📅 今日签到: ${st.lastCheckinDate === nodelocToday() ? (st.lastCheckinMessage || '已完成') : '尚未执行'}\n`;
             msg += `━━━━━━━━━━━━━━━━\n`;
@@ -803,9 +801,9 @@ async function diagnoseNodeseek(userId, env) {
         headers: { 'User-Agent': HEADERS['User-Agent'], 'Cookie': nsAcc.cookie }
     });
     if (r1) rows.push(`   cloudflare=${r1.headers.get('server') === 'cloudflare' ? '是' : (r1.headers.get('cf-mitigated') ? '挑战' : '否')}`);
-    const r2 = await t('POST /api/attendance', NS_BASE + '/api/attendance?random=true', {
+    const r2 = await t('POST /api/attendance', NS_API_BASE + '/api/attendance?random=true', {
         method: 'POST',
-        headers: { 'User-Agent': HEADERS['User-Agent'], 'Cookie': nsAcc.cookie, 'Accept': 'application/json, text/plain, */*', 'Origin': NS_BASE, 'Referer': NS_BASE + '/board', 'Content-Length': '0' }
+        headers: { 'User-Agent': HEADERS['User-Agent'], 'Cookie': nsAcc.cookie, 'Accept': 'application/json, text/plain, */*', 'Origin': NS_API_BASE, 'Referer': NS_API_BASE + '/board', 'Content-Length': '0' }
     });
     if (r2) {
         const raw = await r2.text().catch(() => '');
