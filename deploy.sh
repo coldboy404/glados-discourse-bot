@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # =============================================
-# GLaDOS Bot + NodeLoc / NodeSeek / GLaDOS 多站自动签到 — 一键部署脚本
+# GLaDOS 多账号自动签到 Bot — 一键部署脚本
 # 用法: bash deploy.sh <BOT_TOKEN> <ADMIN_ID> <KV_NAMESPACE_ID>
 # =============================================
 
 set -euo pipefail
 
 echo "=========================================="
-echo " GLaDOS Bot + NodeLoc / NodeSeek / GLaDOS 多站自动签到 部署脚本"
+echo " GLaDOS 多账号自动签到 Bot 部署脚本"
 echo "=========================================="
 
 if [ $# -ne 3 ]; then
@@ -85,10 +85,7 @@ echo ""
 echo "  3. 添加 GLaDOS 账号："
 echo "     账户管理 → 添加账户 → 选择站点 → 粘贴 Cookie"
 echo ""
-echo "  4. （可选）添加 NodeLoc / NodeSeek："
-echo "     账户管理 → 添加账户 → NodeLoc / NodeSeek 自动签到"
-echo ""
-echo "  5. 测试："
+echo "  4. 测试："
 echo "     查看所有账户信息"
 echo ""
 echo "🎉 搞定！"
