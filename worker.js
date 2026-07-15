@@ -726,47 +726,61 @@ async function executeTask(task, env, origin) {
 }
 
 // ================= 定时任务 (CRON) =================
+function getAdminUserId(env) {
+    return String(env.ADMIN_ID || '').trim();
+}
+
+function getBeijingDateParts(now = new Date()) {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hourCycle: 'h23'
+    }).formatToParts(now).reduce(function(result, part) {
+        result[part.type] = part.value;
+        return result;
+    }, {});
+    return { date: `${parts.year}-${parts.month}-${parts.day}`, hour: Number(parts.hour) };
+}
+
+async function claimScheduledCheckin(userId, date, env) {
+    const key = `SCHEDULED_CHECKIN_${userId}_${date}`;
+    if (await env.GLADOS_DB.get(key)) return false;
+    // 先记录当天执行权，避免 Cloudflare Cron 重投或旧 ADMIN_ID 数据导致重复签到。
+    await env.GLADOS_DB.put(key, 'started', { expirationTtl: 172800 });
+    return true;
+}
+
 async function handleScheduled(env) {
-    let usersList = await env.GLADOS_DB.get("ALL_USERS");
-    if (!usersList) return;
-    usersList = JSON.parse(usersList);
+    // 本 Bot 是单管理员设计：ADMIN_ID 变更后，只能给当前管理员执行/推送，
+    // 绝不再遍历历史 ALL_USERS 中残留的旧管理员。
+    const userId = getAdminUserId(env);
+    if (!userId || !env.GLADOS_DB) return;
 
-    const bjDate = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Shanghai" }));
-    const h = bjDate.getHours();
-    const m = bjDate.getMinutes();
+    const now = getBeijingDateParts();
+    const pref = await getPref(userId, env);
+    if (now.hour !== pref.checkinHour) return;
+    if (!await claimScheduledCheckin(userId, now.date, env)) return;
 
-    for (let userId of usersList) {
-        const pref = await getPref(userId, env);
-        const target = pref.checkinHour;
-        let isTrigger = false;
-        if (h === target && m <= 10) isTrigger = true;
-        if (h === (target - 1 + 24) % 24 && m >= 50) isTrigger = true;
-
-        const accounts = await getAccounts(userId, env);
-        if (isTrigger) {
-            const resultRows = [];
-            for (const acc of accounts) {
-                const response = await gladosFetchJson(acc, '/api/user/checkin', { method: 'POST', body: JSON.stringify({ token: GLADOS_DOMAIN }) });
-                const result = response.data;
-                acc.domain = GLADOS_DOMAIN;
-                acc.cronSuccess = gladosCheckinSucceeded(result);
-                acc.cronMsg = result ? escapeHtml(result.message || JSON.stringify(result).slice(0, 60)) : '超时/无响应';
-                resultRows.push(`${acc.cronSuccess ? '✅' : '❌'} <b>GLaDOS</b> ${maskEmail(acc.email || '?', pref.showEmail)}: ${acc.cronSuccess ? '签到成功' : '签到失败'}：${acc.cronMsg}`);
-                await new Promise(function(resolve) { setTimeout(resolve, 600); });
-            }
-            await env.GLADOS_DB.put('USER_' + userId, JSON.stringify(accounts));
-            const gladosBad = accounts.filter(function(acc) { return isGladosAccount(acc) && acc.cronSuccess === false; });
-            if (gladosBad.length > 0) {
-                const names = gladosBad.map(function(acc) { return acc.email || acc.username || '?'; }).join(', ');
-                fetch('https://api.telegram.org/bot' + env.BOT_TOKEN + '/sendMessage', {
-                    method: 'POST', headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ chat_id: env.ADMIN_ID, text: '⚠️ <b>GLaDOS ' + gladosBad.length + ' 个账号签到失败</b>\n' + names, parse_mode: 'HTML' })
-                }).catch(function(){});
-            }
-            await tgSendResultList(userId, '⏰ <b>定时签到自动完成</b>', resultRows, env);
-            await tgSend(userId, await getHealthSummary(userId, env), env);
-        }
+    const accounts = await getAccounts(userId, env);
+    const resultRows = [];
+    for (const acc of accounts) {
+        const response = await gladosFetchJson(acc, '/api/user/checkin', { method: 'POST', body: JSON.stringify({ token: GLADOS_DOMAIN }) });
+        const result = response.data;
+        acc.domain = GLADOS_DOMAIN;
+        acc.cronSuccess = gladosCheckinSucceeded(result);
+        acc.cronMsg = result ? escapeHtml(result.message || JSON.stringify(result).slice(0, 60)) : '超时/无响应';
+        resultRows.push(`${acc.cronSuccess ? '✅' : '❌'} <b>GLaDOS</b> ${maskEmail(acc.email || '?', pref.showEmail)}: ${acc.cronSuccess ? '签到成功' : '签到失败'}：${acc.cronMsg}`);
+        await new Promise(function(resolve) { setTimeout(resolve, 600); });
     }
+    await env.GLADOS_DB.put('USER_' + userId, JSON.stringify(accounts));
+    const gladosBad = accounts.filter(function(acc) { return isGladosAccount(acc) && acc.cronSuccess === false; });
+    if (gladosBad.length > 0) {
+        const names = gladosBad.map(function(acc) { return acc.email || acc.username || '?'; }).join(', ');
+        fetch('https://api.telegram.org/bot' + env.BOT_TOKEN + '/sendMessage', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ chat_id: userId, text: '⚠️ <b>GLaDOS ' + gladosBad.length + ' 个账号签到失败</b>\n' + names, parse_mode: 'HTML' })
+        }).catch(function(){});
+    }
+    await tgSendResultList(userId, '⏰ <b>定时签到自动完成</b>', resultRows, env);
+    await tgSend(userId, await getHealthSummary(userId, env), env);
 }
 
 // ================= 数据解析与提取引擎 =================
@@ -960,11 +974,9 @@ async function getAccounts(userId, env) {
     return normalized;
 }
 async function getPref(userId, env) { const data = await env.GLADOS_DB.get(`PREF_${userId}`); return data ? JSON.parse(data) : { showEmail: false, checkinHour: 12 }; }
-async function saveUserIdForCron(userId, env) {
-    let usersList = await env.GLADOS_DB.get("ALL_USERS");
-    usersList = usersList ? JSON.parse(usersList) : [];
-    if (!usersList.includes(userId)) { usersList.push(userId); await env.GLADOS_DB.put("ALL_USERS", JSON.stringify(usersList)); }
-}
+// 定时签到仅使用当前 ADMIN_ID；保留这个空操作兼容已有的账号导入调用，
+// 不再向 ALL_USERS 写入历史管理员，从源头避免 ADMIN_ID 变更后串号。
+async function saveUserIdForCron(userId, env) {}
 function escapeHtml(value) {
     return String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
