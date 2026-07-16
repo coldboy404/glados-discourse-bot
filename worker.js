@@ -662,7 +662,9 @@ async function executeTask(task, env, origin) {
         if (type === 'checkin' || type === 'view_all') {
             const doCheckin = (type === 'checkin');
             const data = await getAccountDataObj(acc, doCheckin);
-            const gladosMsg = formatAccountString(acc, i + 1, accounts.length, pref, data, true, false);
+            const gladosMsg = type === 'checkin'
+                ? formatCheckinResultRow(acc, i + 1, pref, data)
+                : formatAccountString(acc, i + 1, accounts.length, pref, data, true, false);
             msgs.push(gladosMsg);
             if (type === 'checkin') newResultList.push(gladosMsg);
         } 
@@ -706,7 +708,7 @@ async function executeTask(task, env, origin) {
         if (chatId) {
             const doneKb = { inline_keyboard: [[{ text: "🔙 返回主菜单", callback_data: "menu_main" }]] };
             if (type === 'checkin') {
-                await tgSendResultList(chatId, `✅ <b>全部 ${accounts.length} 个账号签到处理完毕！</b>`, newResultList, env, doneKb);
+                await tgSendResultList(chatId, formatCheckinSummary(newResultList), newResultList, env, doneKb);
             } else if (type === 'view_all') {
                 await tgSend(chatId, `✅ <b>全部 ${accounts.length} 个账号查询处理完毕！</b>`, env, doneKb);
             } else if (type === 'batch_exchange') {
@@ -761,26 +763,17 @@ async function handleScheduled(env) {
 
     const accounts = await getAccounts(userId, env);
     const resultRows = [];
-    for (const acc of accounts) {
-        const response = await gladosFetchJson(acc, '/api/user/checkin', { method: 'POST', body: JSON.stringify({ token: GLADOS_DOMAIN }) });
-        const result = response.data;
+    for (let i = 0; i < accounts.length; i++) {
+        const acc = accounts[i];
+        const data = await getAccountDataObj(acc, true);
         acc.domain = GLADOS_DOMAIN;
-        acc.cronSuccess = gladosCheckinSucceeded(result);
-        acc.cronMsg = result ? escapeHtml(result.message || JSON.stringify(result).slice(0, 60)) : '超时/无响应';
-        resultRows.push(`${acc.cronSuccess ? '✅' : '❌'} <b>GLaDOS</b> ${maskEmail(acc.email || '?', pref.showEmail)}: ${acc.cronSuccess ? '签到成功' : '签到失败'}：${acc.cronMsg}`);
+        acc.cronSuccess = data.checkinState !== 'failed';
+        acc.cronMsg = data.statusMsg;
+        resultRows.push(formatCheckinResultRow(acc, i + 1, pref, data));
         await new Promise(function(resolve) { setTimeout(resolve, 600); });
     }
     await env.GLADOS_DB.put('USER_' + userId, JSON.stringify(accounts));
-    const gladosBad = accounts.filter(function(acc) { return isGladosAccount(acc) && acc.cronSuccess === false; });
-    if (gladosBad.length > 0) {
-        const names = gladosBad.map(function(acc) { return acc.email || acc.username || '?'; }).join(', ');
-        fetch('https://api.telegram.org/bot' + env.BOT_TOKEN + '/sendMessage', {
-            method: 'POST', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ chat_id: userId, text: '⚠️ <b>GLaDOS ' + gladosBad.length + ' 个账号签到失败</b>\n' + names, parse_mode: 'HTML' })
-        }).catch(function(){});
-    }
-    await tgSendResultList(userId, '⏰ <b>定时签到自动完成</b>', resultRows, env);
-    await tgSend(userId, await getHealthSummary(userId, env), env);
+    await tgSendResultList(userId, formatCheckinSummary(resultRows), resultRows, env);
 }
 
 // ================= 数据解析与提取引擎 =================
@@ -843,8 +836,9 @@ async function getSubAndHost(domain, cookie, returnRaw = false) {
 
 async function getAccountDataObj(acc, doCheckin = false) {
     let data = {
-        statusMsg: "❌ 获取超时或受限", trafficStr: "获取失败", medal: "🪙", 
-        pointsStr: "0", timeLeft: "0", planStr: "未知", cookieValid: false
+        statusMsg: "❌ 获取超时或受限", trafficStr: "获取失败", medal: "🪙",
+        pointsStr: "0", pointChange: "-", pointBalance: "0", timeLeft: "0", planStr: "未知",
+        cookieValid: false, checkinState: "failed"
     };
 
     try {
@@ -903,18 +897,29 @@ async function getAccountDataObj(acc, doCheckin = false) {
 
             if (checkedInToday) data.pointsStr = `${changeStr} / ${balanceNum}`;
             else data.pointsStr = `${balanceNum}`;
+            data.pointChange = checkedInToday && changeStr !== '0' ? changeStr : '-';
+            data.pointBalance = String(balanceNum);
 
             if (doCheckin) {
                 if (checkinRes) {
-                    const rawMess = checkinRes.message || "";
-                    if (rawMess.includes("Checkin")) data.statusMsg = "✅ 签到成功";
-                    else if (rawMess.includes("observation logged") || rawMess.includes("Tomorrow")) data.statusMsg = "🔁 今日已签到";
-                    else data.statusMsg = `❌ ${rawMess}`;
+                    const rawMess = String(checkinRes.message || checkinRes.msg || "");
+                    if (/observation logged|tomorrow|already|已签到/i.test(rawMess)) {
+                        data.statusMsg = "🔁 已签到";
+                        data.checkinState = "already";
+                    } else if (gladosCheckinSucceeded(checkinRes)) {
+                        data.statusMsg = "✅ 签到成功";
+                        data.checkinState = "success";
+                    } else {
+                        data.statusMsg = `❌ ${rawMess || '签到失败'}`;
+                        data.checkinState = "failed";
+                    }
                 } else {
                     data.statusMsg = "❌ 签到请求超时";
+                    data.checkinState = "failed";
                 }
             } else {
                 data.statusMsg = checkedInToday ? "🔁 今日已签到" : "⚠️ 今日未签到";
+                data.checkinState = checkedInToday ? "already" : "pending";
             }
         } else {
             if (statusRes && statusRes.code !== 0) data.statusMsg = "❌ Cookie 失效";
@@ -937,6 +942,19 @@ function formatAccountString(acc, index, total, pref, data, includeStatus = true
     str += ` ├ ⏳ 剩余: ${data.timeLeft} 天 (${data.planStr})`;
     if (!isSingle) str += `\n〰️〰️〰️〰️〰️〰️〰️〰️〰️〰️〰️〰️`;
     return str;
+}
+
+function formatCheckinResultRow(acc, index, pref, data) {
+    const status = data.statusMsg || '❌ 签到失败';
+    const change = data.checkinState === 'success' && data.pointChange && data.pointChange !== '0' ? data.pointChange : '-';
+    return `${index}. ${maskEmail(acc.email, pref.showEmail)} | ${status} | 本次:${change} | 剩余积分:${data.pointBalance || '0'} | 剩余:${data.timeLeft || '0'} 天`;
+}
+
+function formatCheckinSummary(rows) {
+    const success = rows.filter(function(row) { return row.includes('✅ 签到成功'); }).length;
+    const failed = rows.filter(function(row) { return row.includes('❌'); }).length;
+    const already = rows.filter(function(row) { return row.includes('🔁 已签到'); }).length;
+    return `<b>GLaDOS 签到完成</b> ✅${success} ❌${failed} 🔁${already}`;
 }
 
 
